@@ -14,7 +14,19 @@ import pytest
 import respx
 from pydantic import SecretStr, ValidationError
 
+import slowquery_detective.llm_explainer as llm_module
 from slowquery_detective.llm_explainer import LlmConfig, explain
+
+
+@pytest.fixture(autouse=True)
+def _reset_cooldown() -> None:
+    """Clear the module-level cooldown map before every test.
+
+    Cooldown is process-local state by design; tests that share the same
+    fingerprint id would otherwise poison each other.
+    """
+    llm_module._COOLDOWN.clear()
+
 
 FID = "abcdef0123456789"
 BASE = "https://openrouter.ai/api/v1"
