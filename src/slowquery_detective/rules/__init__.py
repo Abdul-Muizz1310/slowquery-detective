@@ -1,6 +1,8 @@
 """Rules engine — see ``docs/specs/03-rules.md``.
 
-S3 stub. All behavior lands in S4.
+Public exports for the six-rule pipeline. The rule classes themselves live
+in sibling modules and are assembled into the ``ALL_RULES`` tuple by
+``rules/base.py``.
 """
 
 from __future__ import annotations

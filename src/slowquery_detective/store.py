@@ -1,6 +1,18 @@
-"""Async store writer — see ``docs/specs/05-middleware.md`` + data model.
+"""Async store writer — typed interface with no concrete implementation.
 
-S3 stub. All behavior lands in S4.
+The package ships with ``StoreWriter`` as a thin async interface that raises
+``NotImplementedError`` from every method. Two paths to a working store:
+
+1. Use the concrete implementation in ``slowquery-demo-backend`` (Phase 4b),
+   which ships Alembic migrations for the four tables defined in
+   ``docs/projects/50-slowquery-detective.md`` and wires an asyncpg-backed
+   subclass into ``install(app, engine, store_url=...)``.
+2. Subclass ``StoreWriter`` against your own database. Every method is
+   async and typed — override the four public hooks and pass your instance
+   into ``install()``.
+
+The base class is intentionally abstract so ``slowquery-detective`` as a
+library has no hard dependency on a particular schema.
 """
 
 from __future__ import annotations
