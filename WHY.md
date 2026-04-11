@@ -1,0 +1,7 @@
+# Why slowquery-detective exists
+
+The obvious version of this tool is an APM — ship logs to a hosted service, stare at graphs, click through flame charts. I built `slowquery-detective` because that model makes you leave your editor to find answers that are locally knowable. Everything a Postgres DBA would ask about a slow query — "is this a seq scan? is there an index on the WHERE column? what's the p95 for this query pattern over the last minute?" — is answerable with data already in the process. There is no reason it needs to travel through a vendor first.
+
+The three deliberate design calls are: **fingerprint, not log** (so `WHERE id=1` and `WHERE id=2` collapse into one actionable row instead of 10,000); **rules first, LLM as fallback** (because real performance wins are boring and deterministic — a seq scan on a WHERE column is the same fix whether you're on Postgres 12 or 16); and **`EXPLAIN` off the request path** (because running `EXPLAIN ANALYZE` on a slow query doubles the latency if you do it inline, so it has to be async and rate-limited per fingerprint).
+
+The LLM fallback is the fallback, not the star. It's there for the long tail — the plans where `Sort` nodes, CTE materializations, and `WHERE` clauses interact in ways a six-rule engine can't catch. When the rules engine has an answer, the LLM is never consulted; when it doesn't, the LLM returns a plain-English diagnosis plus a concrete DDL suggestion, or abstains. The goal is a tool that tells you *what to do next*, not one that asks you to interpret a flame chart.
