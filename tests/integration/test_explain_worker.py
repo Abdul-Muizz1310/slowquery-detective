@@ -279,7 +279,7 @@ async def test_33_submit_overhead_under_10us(engine: AsyncEngine) -> None:
     elapsed = time.perf_counter() - t0
     await worker.stop()
     per_call = elapsed / 10_000
-    assert per_call < 10e-6, f"submit overhead {per_call*1e6:.1f}µs (budget 10µs)"
+    assert per_call < 10e-6, f"submit overhead {per_call * 1e6:.1f}µs (budget 10µs)"
 
 
 @pytest.mark.slow

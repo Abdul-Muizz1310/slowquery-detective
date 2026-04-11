@@ -299,7 +299,9 @@ def test_25_no_rule_emits_destructive_ddl() -> None:
     """Grep test over the rules package: no rule's source contains DROP/ALTER/etc."""
     import pathlib
 
-    rules_dir = pathlib.Path(__file__).resolve().parents[2] / "src" / "slowquery_detective" / "rules"
+    rules_dir = (
+        pathlib.Path(__file__).resolve().parents[2] / "src" / "slowquery_detective" / "rules"
+    )
     forbidden = ("DROP ", "ALTER ", "TRUNCATE ", "GRANT ", "REVOKE ", "UPDATE ", "DELETE ")
     for path in rules_dir.glob("*.py"):
         source = path.read_text(encoding="utf-8").upper()

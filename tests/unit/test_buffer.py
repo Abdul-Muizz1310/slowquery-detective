@@ -95,9 +95,7 @@ def test_08_single_sample_all_percentiles_equal() -> None:
     buf = RingBuffer()
     buf.record("fp", 42.0, now=0.0)
     p = buf.percentiles("fp", now=0.0)
-    assert p == Percentiles(
-        sample_count=1, p50_ms=42.0, p95_ms=42.0, p99_ms=42.0, max_ms=42.0
-    )
+    assert p == Percentiles(sample_count=1, p50_ms=42.0, p95_ms=42.0, p99_ms=42.0, max_ms=42.0)
 
 
 def test_09_reservoir_cap_bounds_memory() -> None:

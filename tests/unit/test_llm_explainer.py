@@ -231,9 +231,7 @@ async def test_13_destructive_suggestion_stripped_to_null() -> None:
 async def test_14_invalid_json_returns_none(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.WARNING)
     respx.post(f"{BASE}/chat/completions").mock(
-        return_value=httpx.Response(
-            200, json={"choices": [{"message": {"content": "not json"}}]}
-        )
+        return_value=httpx.Response(200, json={"choices": [{"message": {"content": "not json"}}]})
     )
     s = await explain(CANONICAL, PLAN, config=_config(), fingerprint_id=FID, now=0.0)
     assert s is None
@@ -242,13 +240,9 @@ async def test_14_invalid_json_returns_none(caplog: pytest.LogCaptureFixture) ->
 
 @respx.mock
 async def test_15_missing_confidence_rejected() -> None:
-    content = json.dumps(
-        {"diagnosis": "...", "suggestion": "CREATE INDEX ...", "kind": "index"}
-    )
+    content = json.dumps({"diagnosis": "...", "suggestion": "CREATE INDEX ...", "kind": "index"})
     respx.post(f"{BASE}/chat/completions").mock(
-        return_value=httpx.Response(
-            200, json={"choices": [{"message": {"content": content}}]}
-        )
+        return_value=httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
     )
     s = await explain(CANONICAL, PLAN, config=_config(), fingerprint_id=FID, now=0.0)
     assert s is None

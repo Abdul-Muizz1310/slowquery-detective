@@ -10,13 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from slowquery_detective.explain import CachedPlan, ExplainJob, ExplainWorker
+from slowquery_detective.explain import ExplainJob, ExplainWorker
 from slowquery_detective.rules.base import Suggestion
 from slowquery_detective.store import StoreWriter
 
@@ -50,7 +50,7 @@ def _mock_engine(plan: dict[str, Any] | None = None) -> MagicMock:
             return [{"Plan": fake_plan.get("Plan", fake_plan)}]
 
     class _FakeConn:
-        async def __aenter__(self) -> "_FakeConn":
+        async def __aenter__(self) -> _FakeConn:
             return self
 
         async def __aexit__(self, *_: object) -> None:
@@ -66,7 +66,9 @@ def _mock_engine(plan: dict[str, Any] | None = None) -> MagicMock:
     return engine
 
 
-def _rules_returning(suggestions: list[Suggestion]) -> Callable[[dict[str, Any], str], list[Suggestion]]:
+def _rules_returning(
+    suggestions: list[Suggestion],
+) -> Callable[[dict[str, Any], str], list[Suggestion]]:
     def _rules(_plan: dict[str, Any], _sql: str) -> list[Suggestion]:
         return list(suggestions)
 
@@ -402,7 +404,7 @@ async def test_15_timeout_caches_nothing_worker_continues() -> None:
     class _HangingEngine:
         def connect(self) -> Any:
             class _Conn:
-                async def __aenter__(self) -> "_Conn":
+                async def __aenter__(self) -> _Conn:
                     return self
 
                 async def __aexit__(self, *_: object) -> None:
@@ -437,7 +439,7 @@ async def test_16_db_error_retries_without_analyze() -> None:
     class _FailingEngine:
         def connect(self) -> Any:
             class _Conn:
-                async def __aenter__(self) -> "_Conn":
+                async def __aenter__(self) -> _Conn:
                     return self
 
                 async def __aexit__(self, *_: object) -> None:
@@ -560,9 +562,7 @@ async def test_21_pending_jobs_not_drained_on_stop() -> None:
     await worker.start()
     # Do not wait for drain.
     await worker.stop()
-    cached = sum(
-        1 for i in range(10) if worker.plan_cache_get(f"fp{i:014d}") is not None
-    )
+    cached = sum(1 for i in range(10) if worker.plan_cache_get(f"fp{i:014d}") is not None)
     assert cached < 10
 
 
@@ -646,7 +646,7 @@ async def test_30_param_synthesizer_never_emits_ddl_looking_sql() -> None:
     class _SpyEngine:
         def connect(self) -> Any:
             class _Conn:
-                async def __aenter__(self) -> "_Conn":
+                async def __aenter__(self) -> _Conn:
                     return self
 
                 async def __aexit__(self, *_: object) -> None:
@@ -705,7 +705,7 @@ async def test_31_engine_passed_to_worker_is_used_for_explain() -> None:
     class _MarkerEngine:
         def connect(self) -> Any:
             class _Conn:
-                async def __aenter__(self) -> "_Conn":
+                async def __aenter__(self) -> _Conn:
                     calls.append("used")
                     return self
 
@@ -742,7 +742,9 @@ def test_32_no_text_sql_concatenation_in_source() -> None:
     """
     import pathlib
 
-    path = pathlib.Path(__file__).resolve().parents[2] / "src" / "slowquery_detective" / "explain.py"
+    path = (
+        pathlib.Path(__file__).resolve().parents[2] / "src" / "slowquery_detective" / "explain.py"
+    )
     source = path.read_text(encoding="utf-8")
     # No ``text(f"`` pattern in this module — the synthesizer emits params.
     assert 'text(f"' not in source

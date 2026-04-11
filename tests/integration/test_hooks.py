@@ -154,15 +154,17 @@ def test_10_ddl_is_fingerprinted(sync_engine: Engine) -> None:
     attach(sync_engine, buf)
     with sync_engine.connect() as conn:
         conn.execute(text("CREATE TEMP TABLE _sq_temp (id int)"))
-    assert any("CREATE" in k.upper() for k in buf.keys()) or len(buf.keys()) >= 1
+    keys = buf.keys()
+    assert any("CREATE" in k.upper() for k in keys) or len(keys) >= 1
 
 
 def test_11_failing_query_still_fires_hook(sync_engine: Engine) -> None:
+    from sqlalchemy.exc import DBAPIError
+
     buf = RingBuffer()
     attach(sync_engine, buf)
-    with pytest.raises(Exception):
-        with sync_engine.connect() as conn:
-            conn.execute(text("SELECT 1/0"))
+    with pytest.raises(DBAPIError), sync_engine.connect() as conn:
+        conn.execute(text("SELECT 1/0"))
     assert len(buf.keys()) >= 1
 
 
@@ -320,4 +322,4 @@ def test_23_overhead_budget(sync_engine: Engine) -> None:
     with_hook = time.perf_counter() - t0
 
     per_stmt_added = (with_hook - baseline) / 10_000
-    assert per_stmt_added <= 50e-6, f"added {per_stmt_added*1e6:.1f}µs/stmt (budget 50µs)"
+    assert per_stmt_added <= 50e-6, f"added {per_stmt_added * 1e6:.1f}µs/stmt (budget 50µs)"

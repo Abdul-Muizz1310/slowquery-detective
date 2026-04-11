@@ -41,5 +41,3 @@ def test_detach_noop_on_unattached_engine() -> None:
     # Not an enumerated case in the spec, but invariant 8 ("Detach
     # cleanliness") says detach is safe to call without a prior attach.
     detach(object())  # must not raise (currently NotImplementedError)
-
-
