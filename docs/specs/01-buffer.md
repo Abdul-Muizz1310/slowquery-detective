@@ -19,7 +19,7 @@ class RingBuffer:
     def clear(self, fingerprint_id: str | None = None) -> None: ...
 
 class Percentiles(NamedTuple):
-    count: int
+    sample_count: int                  # ``count`` would shadow tuple.count
     p50_ms: float
     p95_ms: float
     p99_ms: float
@@ -63,7 +63,7 @@ class Percentiles(NamedTuple):
 5. Eviction — record at `now=0, 30, 59`; query at `now=60` → all still counted. Query at `now=61` → sample from `now=0` evicted.
 6. Hard eviction — record at `now=0, 30, 60`, query at `now=121` → all three evicted, returns `None`.
 7. Empty buffer — `percentiles("never-recorded")` → `None`.
-8. Single sample of 42.0 → `Percentiles(count=1, p50=42, p95=42, p99=42, max=42)`.
+8. Single sample of 42.0 → `Percentiles(sample_count=1, p50_ms=42, p95_ms=42, p99_ms=42, max_ms=42)`.
 9. Reservoir cap — record 10,000 samples (window not expired) with increasing values; `len(internal_samples) <= max_samples_per_key`; `p95` is still representative (within 10% of expected).
 10. `max_samples_per_key=1` with 100 samples → always holds exactly one; percentiles reflect the reservoir-chosen sample.
 11. `clear("fp1")` then `percentiles("fp1")` → `None`; other fingerprints untouched.
@@ -82,7 +82,7 @@ class Percentiles(NamedTuple):
 
 ### Concurrency / stress
 
-21. 8 threads × 10,000 `record` calls on the same fingerprint. Post-condition: no exceptions, `count == 80,000` *or* `count == max_samples_per_key`, no deadlock.
+21. 8 threads × 10,000 `record` calls on the same fingerprint. Post-condition: no exceptions, `sample_count == 80,000` *or* `sample_count == max_samples_per_key`, no deadlock.
 22. Interleaved `record` + `percentiles` + `clear` across threads. Invariant: `percentiles` never raises and never returns a tuple containing NaN/Inf.
 23. Injected-clock monotonicity — passing a `now` that goes backwards does not cause samples to resurrect. (Implementation must snapshot `now` and not rely on wall time.)
 

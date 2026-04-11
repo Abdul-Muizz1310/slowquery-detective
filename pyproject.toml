@@ -60,6 +60,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "asyncpg>=0.30",
+    "hypothesis>=6.115",
     "mypy>=1.13",
     "polyfactory>=2.18",
     "pytest>=8.3",
