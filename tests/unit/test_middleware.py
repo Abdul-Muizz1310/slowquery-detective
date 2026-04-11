@@ -14,7 +14,6 @@ from fastapi import FastAPI
 
 from slowquery_detective import install
 from slowquery_detective.dashboard import DDL_ALLOWLIST_REGEX
-from slowquery_detective.llm_explainer import LlmConfig
 
 # ---------------------------------------------------------------------------
 # Argument validation
@@ -51,23 +50,9 @@ def test_11_sample_rate_out_of_range(bad_rate: float) -> None:
         install(app, object(), sample_rate=bad_rate)
 
 
-def test_install_accepts_valid_llm_config() -> None:
-    """Well-formed config should pass validation and reach the S4 body.
-
-    Currently fails with NotImplementedError (as expected in red phase);
-    this test will turn green once S4 implements install().
-    """
-    from pydantic import SecretStr
-
-    cfg = LlmConfig(
-        enabled=True,
-        api_key=SecretStr("k"),
-        model_primary="a",
-        model_fast="b",
-        model_fallback="c",
-    )
-    app = FastAPI()
-    install(app, object(), enable_llm=True, llm_config=cfg)
+# Note: the valid-config happy path for install() — with a real engine and
+# the dashboard router mounted — lives in tests/integration/test_middleware.py.
+# Unit tests here cover argument validation only.
 
 
 # ---------------------------------------------------------------------------

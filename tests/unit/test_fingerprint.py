@@ -204,18 +204,17 @@ def test_27_injection_payload_same_fingerprint_as_benign() -> None:
 @hypothesis.given(
     literal=st.text(
         # The test asserts "user literal content never survives into the
-        # canonical SQL". False positives come from characters that are
-        # structurally part of canonical SQL itself: whitespace (normalized
-        # to single spaces), the ``?`` placeholder marker, and control /
-        # surrogate / punctuation categories that either terminate tokens or
-        # are re-used by the canonical grammar. Excluding them preserves the
-        # property test's real purpose — ensuring PII/secrets don't leak —
-        # without tripping on structural SQL characters.
+        # canonical SQL". Short literals (1-3 characters) can coincidentally
+        # overlap SQL keywords like ``select`` / ``from`` / ``where`` and
+        # produce false positives that have nothing to do with the property
+        # we care about (PII / secret scrubbing). ``min_size=4`` tests
+        # actual content while excluding ``'`` / ``?`` / ``\`` (structural
+        # markers) and control categories.
         alphabet=st.characters(
             whitelist_categories=("L", "N"),  # letters and numbers only
             blacklist_characters="?",  # placeholder marker
         ),
-        min_size=1,
+        min_size=4,
         max_size=32,
     )
 )

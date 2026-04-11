@@ -163,10 +163,7 @@ async def _call_model(
         "Authorization": f"Bearer {config.api_key.get_secret_value()}",
         "Content-Type": "application/json",
     }
-    user_content = (
-        f"Canonical SQL:\n{canonical_sql}\n\n"
-        f"Plan JSON:\n{json.dumps(plan_json)}"
-    )
+    user_content = f"Canonical SQL:\n{canonical_sql}\n\nPlan JSON:\n{json.dumps(plan_json)}"
     body = {
         "model": model,
         "temperature": config.temperature,
