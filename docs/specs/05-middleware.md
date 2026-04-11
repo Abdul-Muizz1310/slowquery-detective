@@ -52,16 +52,29 @@ GET  /api/stream                           # SSE: live p95 per fingerprint
 
 ## Inputs / Outputs / Invariants
 
-1. **`install` side effects** — in order: construct a `RingBuffer`, call `hooks.attach(engine, buffer, sample_rate=sample_rate)`, spin up the background `ExplainWorker` asyncio task, and register shutdown handlers to detach cleanly.
+1. **`install` side effects** — in order: construct a `RingBuffer`, call `hooks.attach(engine, buffer, sample_rate=sample_rate)`, construct and `start()` the `ExplainWorker` (see [`06-explain-worker.md`](06-explain-worker.md) for its contract and tests), wire the hook's slow-threshold check to call `worker.submit(ExplainJob(...))` when `duration_ms >= threshold_ms`, and register `app.on_event("shutdown")` / lifespan handlers to detach the hook and `await worker.stop()`.
 2. **Idempotent** — a second `install(app, engine)` call is a no-op with a warning (`"slowquery.middleware.already_installed"`).
 3. **Store URL** — if `store_url is None`, uses the engine's own URL. The store always writes to a dedicated schema (`slowquery`) so it never collides with application tables.
 4. **DEMO_MODE compatibility** — when the host app's env has `DEMO_MODE=true`, the dashboard router's `/apply` endpoint is enabled; otherwise it returns `403` (applying DDL in production via a web UI is off by default).
 5. **DDL allowlist** — `/apply` accepts only suggestions whose `sql` matches the regex `^CREATE INDEX( CONCURRENTLY)? IF NOT EXISTS ix_[A-Za-z0-9_]+ ON [A-Za-z0-9_"]+\s*\([A-Za-z0-9_,\s()]+\);?$`. Anything else → `400`.
-6. **Shutdown cleanliness** — on `app.shutdown`, `hooks.detach(engine)` is called, the background worker is cancelled and awaited, and the ring buffer is cleared.
-7. **LLM integration** — `enable_llm=True` requires `llm_config`; otherwise `ValueError`. The explain worker consults the rules engine first, only calls `explain(...)` when rules return `[]`.
-8. **Threshold propagation** — `threshold_ms` is stored on the buffer instance and read by the explain worker when deciding whether a fingerprint is "slow".
+6. **Shutdown cleanliness** — on `app.shutdown`, `hooks.detach(engine)` is called, `await worker.stop()` is awaited, and the ring buffer is cleared. The worker's own shutdown contract (5 s in-flight grace, no drain, idempotent stop) lives in [`06-explain-worker.md`](06-explain-worker.md) §shutdown.
+7. **LLM integration** — `enable_llm=True` requires `llm_config`; otherwise `ValueError`. The middleware passes the `llm_config`-constructed `explain` callable into `ExplainWorker(explainer=...)`. Rules-first / LLM-second ordering is the worker's responsibility, not the middleware's.
+8. **Threshold propagation** — the middleware owns the decision of whether a fingerprint crosses `threshold_ms`. The hook's `after_cursor_execute` path compares `duration_ms >= threshold_ms` and, only on true, calls `worker.submit(ExplainJob(...))`. The worker itself trusts the caller and does not re-check the threshold.
 9. **No implicit migrations** — `install` does not create tables. The caller runs Alembic (or the slowquery-demo-backend's migration does it). Documented in README.
 10. **Read-only dashboard by default** — `GET` endpoints never trigger database mutations; they read from the store only.
+
+## Scope boundary
+
+The middleware is a **wiring layer**. It constructs components and connects them; it does not re-test their internals. In particular:
+
+- Fingerprinting rules and edge cases → [`00-fingerprint.md`](00-fingerprint.md)
+- Buffer eviction, percentiles, concurrency → [`01-buffer.md`](01-buffer.md)
+- Hook attach/detach semantics, sync vs. async engines → [`02-hooks.md`](02-hooks.md)
+- Rules engine behavior, DDL generation safety → [`03-rules.md`](03-rules.md)
+- LLM cascade, cooldown, abstention → [`04-explainer.md`](04-explainer.md)
+- **Explain worker rate-limit, plan cache, param substitution, shutdown drain → [`06-explain-worker.md`](06-explain-worker.md)**
+
+The tests below cover the middleware's *own* responsibilities: argument validation, idempotent install, the HTTP surface, the DDL allowlist, and the lifespan-scoped start/stop handshake with the worker.
 
 ## Enumerated test cases
 
@@ -95,9 +108,9 @@ GET  /api/stream                           # SSE: live p95 per fingerprint
 
 ### Shutdown
 
-20. App shutdown cancels the explain worker; no `CancelledError` leaks to logs beyond a single `"slowquery.worker.cancelled"` info line.
+20. App shutdown calls `hooks.detach(engine)` and `await worker.stop()` in that order. The middleware test asserts the *call order* via a spy; the worker's own in-flight drain behavior is owned by [`06-explain-worker.md`](06-explain-worker.md) tests 20–22.
 21. After shutdown, a further DB call on the engine does not raise from the detached hooks (clean detach).
-22. Repeated install/shutdown cycles (3×) do not leak listeners or worker tasks.
+22. Repeated install/shutdown cycles (3×) do not leak listeners, background tasks, or `app.state` entries.
 
 ### SSE stream
 
