@@ -30,7 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
-      - run: uv run pytest -m "not slow and not integration"
+      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=80
 
   build:
     needs: test
