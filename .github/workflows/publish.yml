@@ -1,0 +1,53 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "testpypi-v*.*.*"
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  testpypi:
+    # Runs on tags like ``testpypi-v0.1.0``. Publishes to TestPyPI only.
+    if: startsWith(github.ref, 'refs/tags/testpypi-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/slowquery-detective/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv sync --frozen --all-extras
+      # Re-run the unit suite as a pre-publish gate. Publishing a broken
+      # artifact is much harder to undo than failing a workflow run.
+      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=80
+      - run: uv build
+      - name: Publish to TestPyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: uv publish --publish-url https://test.pypi.org/legacy/
+
+  pypi:
+    # Runs on tags like ``v0.1.0`` (but NOT ``testpypi-v0.1.0`` because
+    # tag patterns can't express negation — the job is filtered in code).
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/slowquery-detective/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv sync --frozen --all-extras
+      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=80
+      - run: uv build
+      - name: Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: uv publish
