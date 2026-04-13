@@ -334,9 +334,7 @@ async def test_23_sse_emits_events_and_closes_cleanly(
         assert b"data:" in event
 
 
-async def test_24_sse_never_leaks_raw_sql(
-    app_with_slowquery: FastAPI, engine: AsyncEngine
-) -> None:
+async def test_24_sse_never_leaks_raw_sql(app_with_slowquery: FastAPI, engine: AsyncEngine) -> None:
     event = await _consume_sse_event(
         app_with_slowquery, engine, "SELECT 'super-secret-value-42' WHERE 1 = 1"
     )
