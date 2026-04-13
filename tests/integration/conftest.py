@@ -1,10 +1,13 @@
-"""Integration test conftest — skip the entire directory when Docker is unavailable.
+"""Integration test conftest — opt-in only.
 
-All integration tests in this directory depend on Testcontainers Postgres,
-which requires a running Docker daemon. When Docker Desktop is not running
-(the normal state on developer machines without it), every test in this
-directory errors at fixture setup. This conftest intercepts collection and
-gracefully skips the whole directory instead of producing 52 errors.
+Integration tests depend on Testcontainers Postgres (Docker). They are
+**skipped by default** and only run when explicitly requested:
+
+    uv run pytest -m integration          # run only integration tests
+    uv run pytest --run-integration       # run everything including integration
+
+This prevents accidental 20+ minute Docker waits during normal development.
+CI uses ``pytest -m "not slow and not integration"`` so these never run there.
 """
 
 from __future__ import annotations
@@ -12,24 +15,46 @@ from __future__ import annotations
 import pytest
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="Run integration tests (requires Docker)",
+    )
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Auto-skip integration tests when Docker is unreachable."""
+    """Skip integration tests unless explicitly requested."""
     if not items:
         return
 
-    # Only check Docker once per collection, not per test.
-    docker_available = _docker_is_available()
-    if docker_available:
+    # If the user explicitly asked for integration tests, let them run.
+    if config.getoption("--run-integration", default=False):
+        # Still check Docker is available.
+        if not _docker_is_available():
+            skip_marker = pytest.mark.skip(reason="Docker daemon not available")
+            for item in items:
+                if "integration" in str(item.fspath):
+                    item.add_marker(skip_marker)
         return
 
-    skip_marker = pytest.mark.skip(
-        reason="Docker daemon not available (integration tests require Testcontainers)"
-    )
+    # If the user ran `pytest -m integration`, let them through.
+    markexpr = config.getoption("-m", default="")
+    if markexpr and "integration" in str(markexpr):
+        if not _docker_is_available():
+            skip_marker = pytest.mark.skip(reason="Docker daemon not available")
+            for item in items:
+                if "integration" in str(item.fspath):
+                    item.add_marker(skip_marker)
+        return
+
+    # Default: skip all integration tests silently.
+    skip_marker = pytest.mark.skip(reason="integration tests skipped by default (use --run-integration)")
     for item in items:
-        # Only touch items that live under the integration directory.
         if "integration" in str(item.fspath):
             item.add_marker(skip_marker)
 
