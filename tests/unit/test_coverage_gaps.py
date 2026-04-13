@@ -7,7 +7,6 @@ test to the specific uncovered line(s) it exercises.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,14 +19,14 @@ import slowquery_detective.llm_explainer as llm_module
 from slowquery_detective.buffer import RingBuffer
 from slowquery_detective.explain import ExplainJob, ExplainWorker
 from slowquery_detective.fingerprint import fingerprint
-from slowquery_detective.hooks import attach, detach
-from slowquery_detective.llm_explainer import LlmConfig, explain as llm_explain
+from slowquery_detective.hooks import attach
+from slowquery_detective.llm_explainer import LlmConfig
+from slowquery_detective.llm_explainer import explain as llm_explain
 from slowquery_detective.middleware import install
 from slowquery_detective.rules.base import (
     Suggestion,
     coerce_int,
     run_rules,
-    walk_nodes,
 )
 from slowquery_detective.rules.function_in_where import FunctionInWhere
 from slowquery_detective.rules.missing_fk_index import MissingFkIndex
@@ -92,11 +91,14 @@ async def test_explain_stop_swallows_non_cancel_exception():
     # Patch wait_for in the explain module to raise a generic exception
     async def _exploding_wait_for(coro, *, timeout=None):
         # Cancel the coro to clean up
-        if hasattr(coro, 'cancel'):
+        if hasattr(coro, "cancel"):
             coro.cancel()
         raise RuntimeError("unexpected stop error")
 
-    with patch("slowquery_detective.explain.asyncio.wait_for", side_effect=RuntimeError("unexpected stop error")):
+    with patch(
+        "slowquery_detective.explain.asyncio.wait_for",
+        side_effect=RuntimeError("unexpected stop error"),
+    ):
         await worker.stop()
     assert worker._task is None
 
@@ -173,10 +175,14 @@ async def test_explain_drain_process_error_logged():
 
     worker._process_one = _failing_process  # type: ignore[assignment]
     await worker.start()
-    worker.submit(ExplainJob(
-        fingerprint_id=FID, canonical_sql="SELECT 1",
-        observed_ms=500.0, enqueued_at=0.0,
-    ))
+    worker.submit(
+        ExplainJob(
+            fingerprint_id=FID,
+            canonical_sql="SELECT 1",
+            observed_ms=500.0,
+            enqueued_at=0.0,
+        )
+    )
     await asyncio.sleep(0.2)
     # Worker should still be running (the loop continues)
     assert worker._task is not None and not worker._task.done()
@@ -239,12 +245,14 @@ async def test_explain_run_explain_no_placeholder_path():
     )
     await worker.start()
     with patch("slowquery_detective.explain.synthesize_params", return_value=None):
-        worker.submit(ExplainJob(
-            fingerprint_id=FID,
-            canonical_sql="SELECT * FROM t WHERE id = ?",
-            observed_ms=500.0,
-            enqueued_at=0.0,
-        ))
+        worker.submit(
+            ExplainJob(
+                fingerprint_id=FID,
+                canonical_sql="SELECT * FROM t WHERE id = ?",
+                observed_ms=500.0,
+                enqueued_at=0.0,
+            )
+        )
         await asyncio.sleep(0.2)
     await worker.stop()
     # Should have used plain EXPLAIN (BUFFERS, FORMAT JSON) without ANALYZE
@@ -309,8 +317,9 @@ class _FreshEngine:
 
 def test_hooks_before_after_cursor_execute_happy_path():
     """Lines 61-64, 67-79: exercise the _before and _after cursor callbacks."""
-    from sqlalchemy import event
     from unittest.mock import patch as mpatch
+
+    from sqlalchemy import event
 
     engine = _FreshEngine()
     buf = RingBuffer()
@@ -340,8 +349,9 @@ def test_hooks_before_after_cursor_execute_happy_path():
 
 def test_hooks_before_skips_on_sampling():
     """Lines 61-64: sample_rate < 1.0 and rng skips => start set to None."""
-    from sqlalchemy import event
     from unittest.mock import patch as mpatch
+
+    from sqlalchemy import event
 
     engine = _FreshEngine()
     buf = RingBuffer()
@@ -370,8 +380,9 @@ def test_hooks_before_skips_on_sampling():
 
 def test_hooks_after_fingerprint_error_logged():
     """Lines 73-75: fingerprint raises => debug log and return."""
-    from sqlalchemy import event
     from unittest.mock import patch as mpatch
+
+    from sqlalchemy import event
 
     engine = _FreshEngine()
     buf = RingBuffer()
@@ -399,8 +410,9 @@ def test_hooks_after_fingerprint_error_logged():
 
 def test_hooks_after_buffer_record_error_logged():
     """Lines 77-79: buffer.record raises => error log."""
-    from sqlalchemy import event
     from unittest.mock import patch as mpatch
+
+    from sqlalchemy import event
 
     engine = _FreshEngine()
     buf = RingBuffer()
@@ -455,22 +467,40 @@ async def test_llm_http_error_is_retriable():
 
     # First call: HTTPError (generic), second call: success
     import json
+
     body = {
-        "choices": [{"message": {"content": json.dumps({
-            "diagnosis": "test", "suggestion": "CREATE INDEX IF NOT EXISTS ix_t_c ON t(c);",
-            "confidence": 0.8, "kind": "index",
-        })}}]
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "diagnosis": "test",
+                            "suggestion": "CREATE INDEX IF NOT EXISTS ix_t_c ON t(c);",
+                            "confidence": 0.8,
+                            "kind": "index",
+                        }
+                    )
+                }
+            }
+        ]
     }
     route.side_effect = [
         httpx.HTTPStatusError("err", request=MagicMock(), response=MagicMock()),
         httpx.Response(200, json=body),
     ]
     cfg = LlmConfig(
-        enabled=True, api_key=SecretStr("k"),
-        model_primary="m1", model_fast="m2", model_fallback="m3",
+        enabled=True,
+        api_key=SecretStr("k"),
+        model_primary="m1",
+        model_fast="m2",
+        model_fallback="m3",
     )
     s = await llm_explain(
-        "SELECT 1", {"Plan": {}}, config=cfg, fingerprint_id=FID, now=0.0,
+        "SELECT 1",
+        {"Plan": {}},
+        config=cfg,
+        fingerprint_id=FID,
+        now=0.0,
     )
     assert s is not None
     assert route.call_count == 2
@@ -480,15 +510,20 @@ async def test_llm_http_error_is_retriable():
 async def test_llm_non_200_non_retriable_returns_none():
     """Line 192: status != 200 and not 401/429/5xx => retry=False, suggestion=None."""
     BASE = "https://openrouter.ai/api/v1"
-    route = respx.post(f"{BASE}/chat/completions").mock(
-        return_value=httpx.Response(403)
-    )
+    route = respx.post(f"{BASE}/chat/completions").mock(return_value=httpx.Response(403))
     cfg = LlmConfig(
-        enabled=True, api_key=SecretStr("k"),
-        model_primary="m1", model_fast="m2", model_fallback="m3",
+        enabled=True,
+        api_key=SecretStr("k"),
+        model_primary="m1",
+        model_fast="m2",
+        model_fallback="m3",
     )
     s = await llm_explain(
-        "SELECT 1", {"Plan": {}}, config=cfg, fingerprint_id=FID, now=0.0,
+        "SELECT 1",
+        {"Plan": {}},
+        config=cfg,
+        fingerprint_id=FID,
+        now=0.0,
     )
     assert s is None
     # 403 is not retriable, so only primary is called (no cascade)
@@ -503,11 +538,18 @@ async def test_llm_malformed_response_structure():
         return_value=httpx.Response(200, json={"wrong_key": "data"})
     )
     cfg = LlmConfig(
-        enabled=True, api_key=SecretStr("k"),
-        model_primary="m1", model_fast="m2", model_fallback="m3",
+        enabled=True,
+        api_key=SecretStr("k"),
+        model_primary="m1",
+        model_fast="m2",
+        model_fallback="m3",
     )
     s = await llm_explain(
-        "SELECT 1", {"Plan": {}}, config=cfg, fingerprint_id=FID, now=0.0,
+        "SELECT 1",
+        {"Plan": {}},
+        config=cfg,
+        fingerprint_id=FID,
+        now=0.0,
     )
     assert s is None
 
@@ -526,15 +568,17 @@ def _mock_engine():
 
 def test_middleware_rules_adapter_called():
     """Line 75: actually invoke the _rules_adapter closure."""
-    from starlette.applications import Starlette
     from fastapi import FastAPI
+    from starlette.applications import Starlette
 
     if not hasattr(Starlette, "add_event_handler"):
+
         def _compat(self, event_type, func):
             if event_type == "startup":
                 self.router.on_startup.append(func)
             elif event_type == "shutdown":
                 self.router.on_shutdown.append(func)
+
         Starlette.add_event_handler = _compat  # type: ignore
 
     engine = _mock_engine()
@@ -552,23 +596,28 @@ def test_middleware_rules_adapter_called():
 
 async def test_middleware_explainer_closure():
     """Line 87: the _explainer closure forwards to llm_explain."""
-    from starlette.applications import Starlette
     from fastapi import FastAPI
+    from starlette.applications import Starlette
 
     if not hasattr(Starlette, "add_event_handler"):
+
         def _compat(self, event_type, func):
             if event_type == "startup":
                 self.router.on_startup.append(func)
             elif event_type == "shutdown":
                 self.router.on_shutdown.append(func)
+
         Starlette.add_event_handler = _compat  # type: ignore
 
     engine = _mock_engine()
     app = FastAPI()
 
     cfg = LlmConfig(
-        enabled=True, api_key=SecretStr("k"),
-        model_primary="m1", model_fast="m2", model_fallback="m3",
+        enabled=True,
+        api_key=SecretStr("k"),
+        model_primary="m1",
+        model_fast="m2",
+        model_fallback="m3",
     )
 
     with patch("slowquery_detective.middleware.attach"):
@@ -577,22 +626,26 @@ async def test_middleware_explainer_closure():
     worker = app.state.slowquery_worker
     assert worker._explainer is not None
 
-    with patch("slowquery_detective.middleware.llm_explain", new_callable=AsyncMock, return_value=None) as mock_llm:
+    with patch(
+        "slowquery_detective.middleware.llm_explain", new_callable=AsyncMock, return_value=None
+    ) as mock_llm:
         result = await worker._explainer("SELECT 1", {"Plan": {}}, fingerprint_id=FID)
         mock_llm.assert_awaited_once()
 
 
 async def test_middleware_startup_handler():
     """Line 112: _on_startup calls worker.start()."""
-    from starlette.applications import Starlette
     from fastapi import FastAPI
+    from starlette.applications import Starlette
 
     if not hasattr(Starlette, "add_event_handler"):
+
         def _compat(self, event_type, func):
             if event_type == "startup":
                 self.router.on_startup.append(func)
             elif event_type == "shutdown":
                 self.router.on_shutdown.append(func)
+
         Starlette.add_event_handler = _compat  # type: ignore
 
     engine = _mock_engine()
@@ -614,15 +667,17 @@ async def test_middleware_startup_handler():
 
 async def test_middleware_shutdown_handler_calls_buffer_clear():
     """Line 117: buffer.clear() called in shutdown handler."""
-    from starlette.applications import Starlette
     from fastapi import FastAPI
+    from starlette.applications import Starlette
 
     if not hasattr(Starlette, "add_event_handler"):
+
         def _compat(self, event_type, func):
             if event_type == "startup":
                 self.router.on_startup.append(func)
             elif event_type == "shutdown":
                 self.router.on_shutdown.append(func)
+
         Starlette.add_event_handler = _compat  # type: ignore
 
     engine = _mock_engine()
@@ -654,16 +709,26 @@ def test_run_rules_catches_rule_exception():
     # Actually, line 156-157 is `except Exception: continue`
     # Let's create a plan that triggers at least one rule, and patch
     # one rule to raise.
-    plan = {"Plan": {"Node Type": "Seq Scan", "Relation Name": "orders",
-                      "Plan Rows": 50000, "Total Cost": 1500.0}}
+    plan = {
+        "Plan": {
+            "Node Type": "Seq Scan",
+            "Relation Name": "orders",
+            "Plan Rows": 50000,
+            "Total Cost": 1500.0,
+        }
+    }
 
     with patch("slowquery_detective.rules.base.ALL_RULES") as mock_rules:
         broken_rule = MagicMock()
         broken_rule.apply.side_effect = RuntimeError("rule broke")
         good_rule = MagicMock()
         good_rule.apply.return_value = Suggestion(
-            kind="index", sql="CREATE INDEX ...", rationale="test",
-            confidence=0.9, source="rules", rule_name="good_rule",
+            kind="index",
+            sql="CREATE INDEX ...",
+            rationale="test",
+            confidence=0.9,
+            source="rules",
+            rule_name="good_rule",
         )
         mock_rules.__iter__ = lambda self: iter([broken_rule, good_rule])
         results = run_rules(plan, "SELECT * FROM orders WHERE id = ?", fingerprint_id=FID)

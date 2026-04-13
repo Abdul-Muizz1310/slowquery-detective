@@ -10,10 +10,7 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from slowquery_detective.explain import (
-    CachedPlan,
     ExplainJob,
     ExplainWorker,
     synthesize_params,
@@ -253,11 +250,15 @@ async def test_explainer_returns_none_no_suggestions_persisted() -> None:
                 "_Conn",
                 (),
                 {
-                    "__aenter__": AsyncMock(return_value=MagicMock(
-                        execute=AsyncMock(return_value=MagicMock(
-                            scalar_one=lambda: [{"Plan": {"Node Type": "Seq Scan"}}]
-                        ))
-                    )),
+                    "__aenter__": AsyncMock(
+                        return_value=MagicMock(
+                            execute=AsyncMock(
+                                return_value=MagicMock(
+                                    scalar_one=lambda: [{"Plan": {"Node Type": "Seq Scan"}}]
+                                )
+                            )
+                        )
+                    ),
                     "__aexit__": AsyncMock(return_value=None),
                 },
             )(),

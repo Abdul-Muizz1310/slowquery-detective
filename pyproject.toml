@@ -79,7 +79,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "SIM", "RUF"]
-ignore = ["E501"]
+ignore = ["E501", "RUF012", "RUF006"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["E501", "N805", "N806", "F841", "RUF006", "RUF043", "RUF059", "SIM105", "SIM118", "SIM222"]
+"src/slowquery_detective/dashboard.py" = ["N806"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -16,8 +16,8 @@ from typing import Any
 
 from sqlalchemy import event
 
-from slowquery_detective.buffer import RingBuffer
 import slowquery_detective.fingerprint as _fp_mod
+from slowquery_detective.buffer import RingBuffer
 
 _LOG = logging.getLogger("slowquery.hooks")
 

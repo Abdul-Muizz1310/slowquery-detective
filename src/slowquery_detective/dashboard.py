@@ -26,10 +26,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from slowquery_detective.explain import ExplainJob, synthesize_params
-from slowquery_detective.fingerprint import fingerprint as fingerprint_fn
-from slowquery_detective.rules import run_rules
-
 _LOG = logging.getLogger("slowquery.dashboard")
 
 # Only ``CREATE INDEX [CONCURRENTLY] IF NOT EXISTS ix_...`` is ever executable
@@ -68,11 +64,10 @@ def _build_router() -> APIRouter:
     @router.get("/api/queries")
     async def list_queries(request: Request) -> Any:
         _check_auth(request)
-        worker = request.app.state.slowquery_worker
         buf = request.app.state.slowquery_buffer
 
         results: list[dict[str, Any]] = []
-        for fid in buf.keys():
+        for fid in buf:
             p = buf.percentiles(fid)
             entry: dict[str, Any] = {"fingerprint_id": fid}
             if p is not None:
@@ -93,7 +88,7 @@ def _build_router() -> APIRouter:
         worker = request.app.state.slowquery_worker
         buf = request.app.state.slowquery_buffer
 
-        if fingerprint_id not in buf.keys():
+        if fingerprint_id not in buf:
             raise HTTPException(status_code=404, detail="Fingerprint not found")
 
         cached = worker.plan_cache_get(fingerprint_id)
@@ -189,7 +184,7 @@ def _build_router() -> APIRouter:
         _check_auth(request)
         worker = request.app.state.slowquery_worker
         buf = request.app.state.slowquery_buffer
-        engine = getattr(request.app.state, "slowquery_engine", None)
+        getattr(request.app.state, "slowquery_engine", None)
 
         # Parse optional body.
         body: _ApplyRequest | None = None
@@ -204,13 +199,11 @@ def _build_router() -> APIRouter:
         if body is not None and body.sql is not None:
             ddl = body.sql
         else:
-            if fingerprint_id not in buf.keys():
+            if fingerprint_id not in buf:
                 raise HTTPException(status_code=404, detail="Unknown fingerprint")
 
             # Look up suggestions — from cache or generated on-the-fly.
-            cached = await _get_or_generate_suggestion(
-                fingerprint_id, worker, buf, request
-            )
+            cached = await _get_or_generate_suggestion(fingerprint_id, worker, buf, request)
             if cached is not None:
                 for s in cached.suggestions:
                     if s.sql and DDL_ALLOWLIST_REGEX.match(s.sql.strip()):
@@ -225,9 +218,7 @@ def _build_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="DDL not on allowlist")
 
         # Rate limit per fingerprint (scoped to this app instance).
-        apply_ts: dict[str, float] = getattr(
-            request.app.state, "_slowquery_apply_timestamps", {}
-        )
+        apply_ts: dict[str, float] = getattr(request.app.state, "_slowquery_apply_timestamps", {})
         if not hasattr(request.app.state, "_slowquery_apply_timestamps"):
             request.app.state._slowquery_apply_timestamps = apply_ts
         now = time.monotonic()
@@ -263,7 +254,6 @@ def _build_router() -> APIRouter:
     async def sse_stream(request: Request) -> StreamingResponse:
         _check_auth(request)
         buf = request.app.state.slowquery_buffer
-        worker = request.app.state.slowquery_worker
 
         async def _event_generator():
             seen: set[str] = set(buf.keys())

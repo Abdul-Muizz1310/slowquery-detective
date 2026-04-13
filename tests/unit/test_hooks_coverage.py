@@ -21,7 +21,6 @@ from sqlalchemy import event
 from slowquery_detective.buffer import RingBuffer
 from slowquery_detective.hooks import _SuppressSetattrErrors, _sync_engine, attach, detach
 
-
 # ---------------------------------------------------------------------------
 # _sync_engine helper
 # ---------------------------------------------------------------------------
@@ -57,9 +56,8 @@ def test_suppress_setattr_errors_swallows_attribute_error() -> None:
 
 
 def test_suppress_setattr_errors_propagates_other_errors() -> None:
-    with pytest.raises(RuntimeError):
-        with _SuppressSetattrErrors():
-            raise RuntimeError("not an attribute error")
+    with pytest.raises(RuntimeError), _SuppressSetattrErrors():
+        raise RuntimeError("not an attribute error")
 
 
 def test_suppress_setattr_enter_returns_none() -> None:

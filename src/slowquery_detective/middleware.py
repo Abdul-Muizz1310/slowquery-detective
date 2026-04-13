@@ -20,9 +20,9 @@ import logging
 import time
 from typing import Any
 
+import slowquery_detective.hooks as _hooks_mod
 from slowquery_detective.buffer import RingBuffer
 from slowquery_detective.explain import ExplainJob, ExplainWorker
-import slowquery_detective.hooks as _hooks_mod
 from slowquery_detective.hooks import attach
 from slowquery_detective.llm_explainer import LlmConfig
 from slowquery_detective.llm_explainer import explain as llm_explain

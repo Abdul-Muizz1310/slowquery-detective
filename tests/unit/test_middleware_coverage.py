@@ -10,25 +10,26 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi import FastAPI
 from starlette.applications import Starlette
 
 from slowquery_detective.middleware import _engine_url
 
-
 # ---------------------------------------------------------------------------
 # Starlette compat shim (same approach as demo-backend's observability.py)
 # ---------------------------------------------------------------------------
 
+
 def _ensure_add_event_handler() -> None:
     """Add the shim if Starlette doesn't have add_event_handler."""
     if not hasattr(Starlette, "add_event_handler"):
+
         def _compat(self: Starlette, event_type: str, func: Any) -> None:
             if event_type == "startup":
                 self.router.on_startup.append(func)
             elif event_type == "shutdown":
                 self.router.on_shutdown.append(func)
+
         Starlette.add_event_handler = _compat  # type: ignore[attr-defined]
 
 
@@ -59,6 +60,7 @@ def test_engine_url_url_is_none() -> None:
 # ---------------------------------------------------------------------------
 # install() happy path with mock engine
 # ---------------------------------------------------------------------------
+
 
 def _mock_engine() -> MagicMock:
     """Return a mock engine that install() can attach to."""

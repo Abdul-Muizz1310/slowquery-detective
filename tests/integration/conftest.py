@@ -25,7 +25,9 @@ def pytest_collection_modifyitems(
     if docker_available:
         return
 
-    skip_marker = pytest.mark.skip(reason="Docker daemon not available (integration tests require Testcontainers)")
+    skip_marker = pytest.mark.skip(
+        reason="Docker daemon not available (integration tests require Testcontainers)"
+    )
     for item in items:
         # Only touch items that live under the integration directory.
         if "integration" in str(item.fspath):
