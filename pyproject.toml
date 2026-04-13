@@ -63,6 +63,7 @@ dev = [
     "hypothesis>=6.115",
     "mypy>=1.13",
     "polyfactory>=2.18",
+    "psycopg2-binary>=2.9.11",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",

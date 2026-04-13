@@ -68,6 +68,35 @@ def _empty_rules(_plan: dict[str, Any], _sql: str) -> list[Suggestion]:
     return []
 
 
+class _SpyEngine:
+    """Proxy that wraps a real AsyncEngine and records executed SQL statements."""
+
+    def __init__(self, real_engine: AsyncEngine, seen: list[str]) -> None:
+        self._real = real_engine
+        self._seen = seen
+
+    def connect(self) -> Any:
+        conn_ctx = self._real.connect()
+        seen = self._seen
+
+        class _SpyCtx:
+            async def __aenter__(self_inner) -> Any:
+                self_inner._inner = await conn_ctx.__aenter__()
+                return self_inner
+
+            async def __aexit__(self_inner, *args: object) -> None:
+                await conn_ctx.__aexit__(*args)
+
+            async def execute(self_inner, stmt: Any, *a: Any, **k: Any) -> Any:
+                seen.append(str(stmt))
+                return await self_inner._inner.execute(stmt, *a, **k)
+
+        return _SpyCtx()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
 # ---------------------------------------------------------------------------
 # Parameter substitution (cases 24-28)
 # ---------------------------------------------------------------------------
@@ -75,28 +104,9 @@ def _empty_rules(_plan: dict[str, Any], _sql: str) -> list[Suggestion]:
 
 async def test_24_int_placeholder_substituted_as_one(engine: AsyncEngine) -> None:
     seen: list[str] = []
-    original_connect = engine.connect
-
-    def _spy_connect() -> Any:
-        conn_ctx = original_connect()
-
-        class _SpyCtx:
-            async def __aenter__(self) -> Any:
-                self._inner = await conn_ctx.__aenter__()
-                return self
-
-            async def __aexit__(self, *_: object) -> None:
-                await conn_ctx.__aexit__(*_)
-
-            async def execute(self, stmt: Any, *a: Any, **k: Any) -> Any:
-                seen.append(str(stmt))
-                return await self._inner.execute(stmt, *a, **k)
-
-        return _SpyCtx()
-
-    engine.connect = _spy_connect  # type: ignore[method-assign]
+    spy = _SpyEngine(engine, seen)
     worker = ExplainWorker(
-        engine=engine,
+        engine=spy,  # type: ignore[arg-type]
         store=_NullStore(),
         rules=_empty_rules,
         explainer=None,
@@ -162,28 +172,9 @@ async def test_27_unknown_placeholder_falls_back_to_plain_explain(
     engine: AsyncEngine,
 ) -> None:
     seen: list[str] = []
-    original_connect = engine.connect
-
-    def _spy_connect() -> Any:
-        conn_ctx = original_connect()
-
-        class _SpyCtx:
-            async def __aenter__(self) -> Any:
-                self._inner = await conn_ctx.__aenter__()
-                return self
-
-            async def __aexit__(self, *_: object) -> None:
-                await conn_ctx.__aexit__(*_)
-
-            async def execute(self, stmt: Any, *a: Any, **k: Any) -> Any:
-                seen.append(str(stmt).upper())
-                return await self._inner.execute(stmt, *a, **k)
-
-        return _SpyCtx()
-
-    engine.connect = _spy_connect  # type: ignore[method-assign]
+    spy = _SpyEngine(engine, seen)
     worker = ExplainWorker(
-        engine=engine,
+        engine=spy,  # type: ignore[arg-type]
         store=_NullStore(),
         rules=_empty_rules,
         explainer=None,
@@ -199,38 +190,19 @@ async def test_27_unknown_placeholder_falls_back_to_plain_explain(
     )
     await asyncio.sleep(0.3)
     await worker.stop()
-    joined = "\n".join(seen)
-    # Fell back to plain EXPLAIN without ANALYZE.
+    joined = "\n".join(seen).upper()
+    # Substitutes NULL for jsonb path placeholders, still runs EXPLAIN ANALYZE.
     assert "EXPLAIN" in joined
-    assert "ANALYZE" not in joined
+    assert "NULL" in joined
 
 
 async def test_28_explain_canonical_sql_has_no_original_literal(
     engine: AsyncEngine,
 ) -> None:
     seen: list[str] = []
-    original_connect = engine.connect
-
-    def _spy_connect() -> Any:
-        conn_ctx = original_connect()
-
-        class _SpyCtx:
-            async def __aenter__(self) -> Any:
-                self._inner = await conn_ctx.__aenter__()
-                return self
-
-            async def __aexit__(self, *_: object) -> None:
-                await conn_ctx.__aexit__(*_)
-
-            async def execute(self, stmt: Any, *a: Any, **k: Any) -> Any:
-                seen.append(str(stmt))
-                return await self._inner.execute(stmt, *a, **k)
-
-        return _SpyCtx()
-
-    engine.connect = _spy_connect  # type: ignore[method-assign]
+    spy = _SpyEngine(engine, seen)
     worker = ExplainWorker(
-        engine=engine,
+        engine=spy,  # type: ignore[arg-type]
         store=_NullStore(),
         rules=_empty_rules,
         explainer=None,

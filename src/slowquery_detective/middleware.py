@@ -17,11 +17,13 @@ argument validation only.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from slowquery_detective.buffer import RingBuffer
-from slowquery_detective.explain import ExplainWorker
-from slowquery_detective.hooks import attach, detach
+from slowquery_detective.explain import ExplainJob, ExplainWorker
+import slowquery_detective.hooks as _hooks_mod
+from slowquery_detective.hooks import attach
 from slowquery_detective.llm_explainer import LlmConfig
 from slowquery_detective.llm_explainer import explain as llm_explain
 from slowquery_detective.rules import run_rules
@@ -67,8 +69,6 @@ def install(
         return
 
     buffer = RingBuffer()
-    attach(engine, buffer, sample_rate=sample_rate)
-
     store = StoreWriter(store_url or _engine_url(engine))
 
     def _rules_adapter(plan: dict[str, Any], canonical_sql: str) -> list[Suggestion]:
@@ -100,24 +100,55 @@ def install(
         explainer=explainer,
     )
 
+    # Cache of fingerprint_id -> canonical_sql for on-demand suggestion
+    # generation in the dashboard router.
+    canonical_sql_cache: dict[str, str] = {}
+
+    def _on_record(fp_id: str, canonical_sql: str, duration_ms: float) -> None:
+        """Submit an explain job for every observed query.
+
+        The worker's per-fingerprint cooldown ensures we don't re-run EXPLAIN
+        for the same fingerprint more than once per cooldown window.
+        """
+        canonical_sql_cache[fp_id] = canonical_sql
+        job = ExplainJob(
+            fingerprint_id=fp_id,
+            canonical_sql=canonical_sql,
+            observed_ms=duration_ms,
+            enqueued_at=time.monotonic(),
+        )
+        worker.submit(job)
+
+    attach(engine, buffer, sample_rate=sample_rate, on_record=_on_record)
+
     app.state.slowquery_buffer = buffer
     app.state.slowquery_store = store
     app.state.slowquery_worker = worker
+    app.state.slowquery_engine = engine
     app.state.slowquery_threshold_ms = threshold_ms
+    app.state.slowquery_canonical_sql_cache = canonical_sql_cache
     setattr(app.state, _INSTALLED_ATTR, True)
 
-    # FastAPI's decorator form is untyped under mypy-strict; use
-    # ``add_event_handler`` (also public) to avoid ``# type: ignore``.
+    # Start the worker eagerly so it processes explain jobs immediately.
+    # Also register startup/shutdown handlers for apps that use lifespan.
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(worker.start())
+    except RuntimeError:
+        pass  # no running loop; worker will be started on startup
+
     async def _on_startup() -> None:
         await worker.start()
 
     async def _on_shutdown() -> None:
-        detach(engine)
+        _hooks_mod.detach(engine)
         await worker.stop()
         buffer.clear()
 
-    app.add_event_handler("startup", _on_startup)
-    app.add_event_handler("shutdown", _on_shutdown)
+    app.router.add_event_handler("startup", _on_startup)
+    app.router.add_event_handler("shutdown", _on_shutdown)
 
 
 def _engine_url(engine: Any) -> str:

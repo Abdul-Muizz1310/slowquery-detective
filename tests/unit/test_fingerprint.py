@@ -201,22 +201,20 @@ def test_27_injection_payload_same_fingerprint_as_benign() -> None:
     assert fid_injection == fid_benign
 
 
+# SQL keywords whose substrings can coincidentally match short generated
+# literals (e.g. "sele" ⊂ "select"), producing false positives.
+_SQL_KEYWORDS = ("select", "from", "where", "name")
+
+
 @hypothesis.given(
     literal=st.text(
-        # The test asserts "user literal content never survives into the
-        # canonical SQL". Short literals (1-3 characters) can coincidentally
-        # overlap SQL keywords like ``select`` / ``from`` / ``where`` and
-        # produce false positives that have nothing to do with the property
-        # we care about (PII / secret scrubbing). ``min_size=4`` tests
-        # actual content while excluding ``'`` / ``?`` / ``\`` (structural
-        # markers) and control categories.
         alphabet=st.characters(
             whitelist_categories=("L", "N"),  # letters and numbers only
             blacklist_characters="?",  # placeholder marker
         ),
         min_size=4,
         max_size=32,
-    )
+    ).filter(lambda s: not any(s.lower() in kw for kw in _SQL_KEYWORDS))
 )
 @hypothesis.settings(max_examples=200, deadline=None)
 def test_28_property_no_literal_survives_in_canonical(literal: str) -> None:
