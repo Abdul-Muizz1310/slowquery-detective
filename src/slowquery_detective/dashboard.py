@@ -68,7 +68,7 @@ def _build_router() -> APIRouter:
         buf = request.app.state.slowquery_buffer
 
         results: list[dict[str, Any]] = []
-        for fid in buf.keys():
+        for fid in buf:
             p = buf.percentiles(fid)
             entry: dict[str, Any] = {"fingerprint_id": fid}
             if p is not None:
@@ -89,7 +89,7 @@ def _build_router() -> APIRouter:
         worker = request.app.state.slowquery_worker
         buf = request.app.state.slowquery_buffer
 
-        if fingerprint_id not in buf.keys():
+        if fingerprint_id not in buf:
             raise HTTPException(status_code=404, detail="Fingerprint not found")
 
         cached = worker.plan_cache_get(fingerprint_id)
@@ -197,7 +197,7 @@ def _build_router() -> APIRouter:
 
         # Determine the DDL to execute.
         # Always verify fingerprint exists — even for body-supplied DDL
-        if fingerprint_id not in buf.keys():
+        if fingerprint_id not in buf:
             raise HTTPException(status_code=404, detail="Unknown fingerprint")
 
         ddl: str | None = None
