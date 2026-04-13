@@ -57,9 +57,9 @@ def _docker_is_available() -> bool:
 # Shared session-scoped Postgres container (boots once for ALL integration tests)
 # ---------------------------------------------------------------------------
 
-from collections.abc import Iterator
+from collections.abc import Iterator  # noqa: E402
 
-from testcontainers.postgres import PostgresContainer
+from testcontainers.postgres import PostgresContainer  # noqa: E402
 
 
 @pytest.fixture(scope="session")
