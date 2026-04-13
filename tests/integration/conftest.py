@@ -51,3 +51,19 @@ def _docker_is_available() -> bool:
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Shared session-scoped Postgres container (boots once for ALL integration tests)
+# ---------------------------------------------------------------------------
+
+from collections.abc import Iterator
+
+from testcontainers.postgres import PostgresContainer
+
+
+@pytest.fixture(scope="session")
+def pg() -> Iterator[PostgresContainer]:
+    """Single Postgres container shared across all integration test files."""
+    with PostgresContainer("postgres:16-alpine") as container:
+        yield container

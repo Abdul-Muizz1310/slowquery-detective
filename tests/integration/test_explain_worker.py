@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -25,10 +25,7 @@ pytestmark = pytest.mark.integration
 FID = "abcdef0123456789"
 
 
-@pytest.fixture(scope="module")
-def pg() -> Iterator[PostgresContainer]:
-    with PostgresContainer("postgres:16-alpine") as container:
-        yield container
+# pg() fixture is session-scoped in conftest.py — shared across all integration tests.
 
 
 @pytest.fixture()

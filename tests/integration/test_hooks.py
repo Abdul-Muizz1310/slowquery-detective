@@ -28,10 +28,7 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def pg() -> Iterator[PostgresContainer]:
-    with PostgresContainer("postgres:16-alpine") as container:
-        yield container
+# pg() fixture is session-scoped in conftest.py — shared across all integration tests.
 
 
 @pytest.fixture()

@@ -68,7 +68,7 @@ def _build_router() -> APIRouter:
         buf = request.app.state.slowquery_buffer
 
         results: list[dict[str, Any]] = []
-        for fid in buf:
+        for fid in buf.keys():
             p = buf.percentiles(fid)
             entry: dict[str, Any] = {"fingerprint_id": fid}
             if p is not None:
@@ -89,7 +89,7 @@ def _build_router() -> APIRouter:
         worker = request.app.state.slowquery_worker
         buf = request.app.state.slowquery_buffer
 
-        if fingerprint_id not in buf:
+        if fingerprint_id not in buf.keys():
             raise HTTPException(status_code=404, detail="Fingerprint not found")
 
         cached = worker.plan_cache_get(fingerprint_id)
@@ -200,7 +200,7 @@ def _build_router() -> APIRouter:
         if body is not None and body.sql is not None:
             ddl = body.sql
         else:
-            if fingerprint_id not in buf:
+            if fingerprint_id not in buf.keys():
                 raise HTTPException(status_code=404, detail="Unknown fingerprint")
 
             # Look up suggestions — from cache or generated on-the-fly.
