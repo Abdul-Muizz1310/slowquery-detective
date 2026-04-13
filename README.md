@@ -11,7 +11,7 @@
 ![sqlalchemy](https://img.shields.io/badge/SQLAlchemy-2.0-d71f00?style=flat-square)
 ![fastapi](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![mypy](https://img.shields.io/badge/mypy-strict-blue?style=flat-square)
-![coverage](https://img.shields.io/badge/coverage-84%25-green?style=flat-square)
+![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
 
 ---
@@ -131,7 +131,7 @@ slowquery-detective/
 │   └── middleware.py         # install() — wires everything together
 ├── docs/specs/              # 7 feature specs (Spec-TDD)
 ├── tests/
-│   ├── unit/                # 177 unit tests
+│   ├── unit/                # 265 unit tests
 │   ├── integration/         # Testcontainers Postgres tests
 │   └── fixtures/
 ├── pyproject.toml
@@ -204,12 +204,13 @@ The cascade is `PRIMARY → FAST → FALLBACK` on HTTP 429 / 5xx / network error
 
 | Metric | Value |
 |---|---|
-| Unit tests | 177 |
-| Coverage | 84% |
+| Unit tests | 265 |
+| Integration tests | 52 |
+| Line coverage | 100% |
 | Feature specs | 7 (under `docs/specs/`) |
 | Type checker | mypy strict, zero errors |
 
-The test suite is **Spec-TDD**: 7 feature specs under [`docs/specs/`](docs/specs/) list every enumerated test case, and 195 pytest items encode them — 177 unit tests that run in CI, plus integration/slow tests gated on testcontainers Postgres.
+The test suite is **Spec-TDD**: 7 feature specs under [`docs/specs/`](docs/specs/) list every enumerated test case, and 317 pytest items encode them — 265 unit tests that run in CI, plus 52 integration/slow tests gated on testcontainers Postgres.
 
 ```bash
 uv run pytest                    # unit tests only (default)
@@ -232,7 +233,7 @@ uv run pytest -m slow            # benchmark-style tests
 | Milestone | Status |
 |---|---|
 | v0.1.0 on [PyPI](https://pypi.org/project/slowquery-detective/) | ✅ Released 2026-04-11 |
-| 177 unit tests, 84% coverage, mypy strict | ✅ Green |
+| 265 unit + 52 integration tests, 100% coverage, mypy strict | ✅ Green |
 | `pip install slowquery-detective[fastapi,llm]` in fresh 3.12 venv | ✅ Verified |
 | Live demo ([slowquery-demo-backend](https://github.com/Abdul-Muizz1310/slowquery-demo-backend)) | 🟡 Phase 4b |
 | Dashboard ([slowquery-dashboard-frontend](https://github.com/Abdul-Muizz1310/slowquery-dashboard-frontend)) | 🟡 Phase 4c |
