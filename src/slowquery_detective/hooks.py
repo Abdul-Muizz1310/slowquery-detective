@@ -77,7 +77,8 @@ def attach(
     def _pop_start(cursor: Any) -> float | None:
         """Retrieve and remove start time from cursor.info or fallback dict."""
         try:
-            return cursor.info.pop(_START_KEY, None)
+            val: float | None = cursor.info.pop(_START_KEY, None)
+            return val
         except AttributeError:
             return _CURSOR_STORE.pop(id(cursor), None)
 

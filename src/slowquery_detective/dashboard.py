@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -255,7 +256,7 @@ def _build_router() -> APIRouter:
         _check_auth(request)
         buf = request.app.state.slowquery_buffer
 
-        async def _event_generator():
+        async def _event_generator() -> AsyncGenerator[str, None]:
             seen: set[str] = set(buf.keys())
             while True:
                 current = buf.keys()
