@@ -132,6 +132,10 @@ def attach(
         if cursor is not None and statement is not None:
             conn = getattr(exception_context, "connection", None)
             _after(conn, cursor, statement)
+        elif cursor is not None:
+            # Clean up _CURSOR_STORE even when statement is None
+            # to prevent memory leaks on connection-level errors
+            _pop_start(cursor)
 
     event.listen(sync_engine, "before_cursor_execute", _before)
     event.listen(sync_engine, "after_cursor_execute", _after)

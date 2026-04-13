@@ -34,7 +34,7 @@ _LOG = logging.getLogger("slowquery.dashboard")
 DDL_ALLOWLIST_REGEX: re.Pattern[str] = re.compile(
     r"^CREATE INDEX( CONCURRENTLY)? IF NOT EXISTS "
     r'ix_[A-Za-z0-9_]+ ON [A-Za-z0-9_"]+\s*\('
-    r"[A-Za-z0-9_,\s()]+\);?$"
+    r"[A-Za-z0-9_,\s()]+\);?\Z"  # \Z not $ — prevents newline injection
 )
 
 
@@ -196,13 +196,14 @@ def _build_router() -> APIRouter:
             pass
 
         # Determine the DDL to execute.
+        # Always verify fingerprint exists — even for body-supplied DDL
+        if fingerprint_id not in buf.keys():
+            raise HTTPException(status_code=404, detail="Unknown fingerprint")
+
         ddl: str | None = None
         if body is not None and body.sql is not None:
             ddl = body.sql
         else:
-            if fingerprint_id not in buf.keys():
-                raise HTTPException(status_code=404, detail="Unknown fingerprint")
-
             # Look up suggestions — from cache or generated on-the-fly.
             cached = await _get_or_generate_suggestion(fingerprint_id, worker, buf, request)
             if cached is not None:
@@ -213,8 +214,10 @@ def _build_router() -> APIRouter:
             if ddl is None:
                 raise HTTPException(status_code=404, detail="No applicable DDL suggestion")
 
-        # Validate against the allowlist.
+        # Validate against the allowlist — reject embedded newlines first.
         ddl_stripped = ddl.strip()
+        if "\n" in ddl_stripped or "\r" in ddl_stripped:
+            raise HTTPException(status_code=400, detail="DDL not on allowlist")
         if not DDL_ALLOWLIST_REGEX.match(ddl_stripped):
             raise HTTPException(status_code=400, detail="DDL not on allowlist")
 

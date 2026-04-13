@@ -71,8 +71,16 @@ def install(
     buffer = RingBuffer()
     store = StoreWriter(store_url or _engine_url(engine))
 
-    def _rules_adapter(plan: dict[str, Any], canonical_sql: str) -> list[Suggestion]:
-        return run_rules(plan, canonical_sql, fingerprint_id="")
+    def _rules_adapter(
+        plan: dict[str, Any],
+        canonical_sql: str,
+        *,
+        fingerprint_id: str = "",
+        recent_call_count: int = 0,
+    ) -> list[Suggestion]:
+        return run_rules(
+            plan, canonical_sql, fingerprint_id=fingerprint_id, recent_call_count=recent_call_count
+        )
 
     explainer = None
     if enable_llm and llm_config is not None:
