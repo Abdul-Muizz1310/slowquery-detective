@@ -142,12 +142,12 @@ middleware → (hooks | buffer | explain_worker | store | dashboard)
 
 | Layer | Count | Runs in CI? |
 |---|---|---|
-| Unit (`tests/unit/`) | 177 | Yes (default filter: `-m "not slow and not integration"`) |
-| Integration (`tests/integration/`) | 53 | No -- needs testcontainers Postgres, run locally via `uv run pytest -m integration` |
-| Slow (`@pytest.mark.slow`) | 3 | No -- benchmark-style, run via `uv run pytest -m slow` |
-| **Total** | **233** | |
+| Unit (`tests/unit/`) | 265 | Yes (default filter: `-m "not slow and not integration"`) |
+| Integration (`tests/integration/`) | 52 | No -- needs testcontainers Postgres, run locally via `uv run pytest -m integration` |
+| Slow (`@pytest.mark.slow`) | 6 | No -- benchmark-style, run via `uv run pytest -m slow` |
+| **Total** | **317** | |
 
-Coverage on `src/slowquery_detective` stands at **84.01%** from unit tests alone. Running the integration suite locally pushes hooks (38%) and middleware (45%) well above 80% -- their meat lives in the end-to-end cases that need a real database.
+Coverage on `src/slowquery_detective` stands at **86%** from unit tests alone. Running the integration suite locally pushes hooks (38%) and middleware (45%) well above 80% -- their meat lives in the end-to-end cases that need a real database.
 
 ## Deferred components
 
