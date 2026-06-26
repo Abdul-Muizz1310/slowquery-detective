@@ -218,6 +218,19 @@ uv run pytest -m integration     # testcontainers Postgres required
 uv run pytest -m slow            # benchmark-style tests
 ```
 
+## ⚡ Benchmarks
+
+Hot-path overhead, measured with no database (reproduce: `uv run python benchmarks/bench_detective.py`; full table in [`benchmarks/report.md`](benchmarks/report.md)):
+
+| Operation | µs/op |
+|---|--:|
+| Ring buffer `record` | ~0.8 |
+| Ring buffer `percentiles` (1024-sample window) | ~0.5 |
+| Rules engine (6 rules over a plan) | ~10 |
+| Fingerprint (sqlglot) — flat `SELECT` … 2-table JOIN | ~334 … 743 |
+
+Per-query accounting (ring buffer + rules) is ~11 µs; the only meaningful cost is the `sqlglot` fingerprint parse (~0.2–0.7 ms, scaling with query complexity), which stays under the library's ≤1 ms/statement overhead budget. Numbers are from `Windows-11 / Python 3.12.12`; re-run on your target.
+
 ## 🧭 Engineering philosophy
 
 | Principle | How it's applied |
