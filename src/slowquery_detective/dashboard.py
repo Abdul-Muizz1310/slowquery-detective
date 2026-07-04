@@ -14,6 +14,7 @@ engine, the middleware, and the red tests all share exactly one definition.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -42,6 +43,44 @@ def _is_demo_mode() -> bool:
     return os.environ.get("DEMO_MODE", "").lower() == "true"
 
 
+def _expected_token() -> str | None:
+    """The configured dashboard token, or ``None`` when auth is not enforced."""
+    tok = os.environ.get("SLOWQUERY_PLATFORM_TOKEN", "").strip()
+    return tok or None
+
+
+# Extract the target table + column expression from an already-allowlisted
+# ``CREATE INDEX ... ON <table>(<cols>)`` statement.
+_INDEX_TARGET_RE = re.compile(
+    r"\bon\s+\"?(?P<table>[A-Za-z0-9_]+)\"?\s*\((?P<cols>[^)]*)\)",
+    re.IGNORECASE,
+)
+_IDENTIFIER_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _identifier_tokens(text_value: str) -> set[str]:
+    return {m.group(0).lower() for m in _IDENTIFIER_TOKEN_RE.finditer(text_value)}
+
+
+def _ddl_bound_to_fingerprint(ddl: str, canonical_sql: str | None) -> bool:
+    """True iff every table/column identifier in ``ddl`` appears in the SQL.
+
+    Binds a body-supplied ``CREATE INDEX`` to the fingerprint it claims to
+    optimize: an anonymous caller can't force ``CREATE INDEX ... ON any_table``
+    unless that table and its columns actually appear in the fingerprint's
+    canonical SQL (audit HIGH — no binding between DDL and fingerprint).
+    """
+    if not canonical_sql:
+        return False
+    m = _INDEX_TARGET_RE.search(ddl)
+    if m is None:
+        return False
+    target_ids = _identifier_tokens(m.group("table")) | _identifier_tokens(m.group("cols"))
+    if not target_ids:
+        return False
+    return target_ids.issubset(_identifier_tokens(canonical_sql))
+
+
 class _ApplyRequest(BaseModel):
     sql: str | None = None
 
@@ -56,6 +95,24 @@ def _build_router() -> APIRouter:
     # Auth guard
     # ---------------------------------------------------------------
     def _check_auth(request: Request) -> None:
+        """Per-request auth.
+
+        If a dashboard token is configured (``SLOWQUERY_PLATFORM_TOKEN``),
+        every request must carry a matching ``X-Platform-Token`` header —
+        this is what lets a *public* demo (which must run with
+        ``DEMO_MODE=true`` to expose ``/apply``) still refuse anonymous
+        callers. When no token is configured, fall back to the ``DEMO_MODE``
+        gate (403 outside demo mode) for local development.
+        """
+        expected = _expected_token()
+        if expected is not None:
+            provided = request.headers.get("x-platform-token")
+            if not provided or not hmac.compare_digest(provided, expected):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Missing or invalid X-Platform-Token",
+                )
+            return
         if not _is_demo_mode():
             raise HTTPException(status_code=403, detail="Forbidden outside demo mode")
 
@@ -100,82 +157,53 @@ def _build_router() -> APIRouter:
             plan = cached.plan_json
             suggestions = [s.model_dump() for s in cached.suggestions]
 
+        # Include the fingerprint's current percentile summary so the detail
+        # response honors the documented "plan + suggestions + samples" shape.
+        # Only aggregate percentiles are exposed — never raw literals (the
+        # buffer never stores them anyway).
+        percentiles: dict[str, Any] | None = None
+        p = buf.percentiles(fingerprint_id)
+        if p is not None:
+            percentiles = {
+                "sample_count": p.sample_count,
+                "p50_ms": p.p50_ms,
+                "p95_ms": p.p95_ms,
+                "p99_ms": p.p99_ms,
+                "max_ms": p.max_ms,
+            }
+
         return {
             "fingerprint_id": fingerprint_id,
             "plan": plan,
             "suggestions": suggestions,
+            "percentiles": percentiles,
         }
 
     # ---------------------------------------------------------------
-    # On-demand EXPLAIN + suggestion helper
+    # Cached-suggestion helper (rules-engine output only)
     # ---------------------------------------------------------------
-    _WHERE_COL_RE = re.compile(
-        r"\bwhere\s+(?:\"?(\w+)\"?\.)?\"?(\w+)\"?\s*(?:=|>|<|>=|<=|!=|<>|in|like)",
-        re.IGNORECASE,
-    )
-    _FROM_TABLE_RE = re.compile(
-        r"\bfrom\s+\"?(\w+)\"?",
-        re.IGNORECASE,
-    )
+    async def _cached_suggestion_ddl(fingerprint_id: str, worker: Any) -> str | None:
+        """Return the first allowlisted DDL suggestion for a fingerprint.
 
-    async def _get_or_generate_suggestion(
-        fingerprint_id: str, worker: Any, buf: Any, request: Request
-    ) -> Any:
-        """Return a CachedPlan with suggestions, generating one on-the-fly if needed.
-
-        If the rules engine produced suggestions, return the cached plan.
-        Otherwise, generate a best-effort index suggestion from the
-        canonical SQL's WHERE clause.
+        Flushes any queued EXPLAIN jobs via the worker's public
+        ``process_pending`` (no reaching into private internals) so a
+        freshly-observed query surfaces its rules-engine suggestion. Only
+        suggestions produced by the tested, plan-aware rules engine are
+        eligible — there is no free-form regex fallback (audit MEDIUM: the
+        on-demand fallback bound WHERE columns to the wrong table on JOINs).
         """
-        from slowquery_detective.explain import CachedPlan
-
-        sql_cache = getattr(request.app.state, "slowquery_canonical_sql_cache", {})
-
-        # Process any pending jobs.
         try:
-            while not worker._queue.empty():
-                job = worker._queue.get_nowait()
-                sql_cache[job.fingerprint_id] = job.canonical_sql
-                await worker._process_one(job)
+            await worker.process_pending()
         except Exception:
-            pass
+            _LOG.debug("slowquery.dashboard.process_pending_error", exc_info=True)
 
         cached = worker.plan_cache_get(fingerprint_id)
-        if cached is not None and cached.suggestions:
-            return cached
-
-        # Generate a best-effort index suggestion from the canonical SQL.
-        canonical_sql = sql_cache.get(fingerprint_id)
-        if canonical_sql is None:
-            return cached
-
-        match = _WHERE_COL_RE.search(canonical_sql)
-        table_match = _FROM_TABLE_RE.search(canonical_sql)
-        if match and table_match:
-            col = match.group(2)
-            table = table_match.group(1)
-            from slowquery_detective.rules.base import IDENTIFIER_RE, Suggestion
-
-            if IDENTIFIER_RE.match(col) and IDENTIFIER_RE.match(table):
-                ddl_sql = f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table}({col});"
-                suggestion = Suggestion(
-                    kind="index",
-                    sql=ddl_sql,
-                    rationale=f"Index on {table}.{col} for WHERE clause",
-                    confidence=0.7,
-                    source="rules",
-                    rule_name="on_demand_index",
-                )
-                plan_json = cached.plan_json if cached else {}
-                return CachedPlan(
-                    plan_json=plan_json,
-                    plan_text="",
-                    cost=0.0,
-                    captured_at=time.monotonic(),
-                    suggestions=(suggestion,),
-                )
-
-        return cached
+        if cached is None:
+            return None
+        for s in cached.suggestions:
+            if s.sql and DDL_ALLOWLIST_REGEX.match(s.sql.strip()):
+                return str(s.sql.strip())
+        return None
 
     # ---------------------------------------------------------------
     # POST /api/queries/{fingerprint_id}/apply
@@ -185,7 +213,7 @@ def _build_router() -> APIRouter:
         _check_auth(request)
         worker = request.app.state.slowquery_worker
         buf = request.app.state.slowquery_buffer
-        getattr(request.app.state, "slowquery_engine", None)
+        sql_cache: dict[str, str] = getattr(request.app.state, "slowquery_canonical_sql_cache", {})
 
         # Parse optional body.
         body: _ApplyRequest | None = None
@@ -195,26 +223,32 @@ def _build_router() -> APIRouter:
         except Exception:
             pass
 
-        # Determine the DDL to execute.
-        # Always verify fingerprint exists — even for body-supplied DDL
-        if fingerprint_id not in buf:
-            raise HTTPException(status_code=404, detail="Unknown fingerprint")
-
         ddl: str | None = None
         if body is not None and body.sql is not None:
-            ddl = body.sql
+            # Body-supplied DDL: validate the allowlist *first* so malformed /
+            # destructive DDL is rejected (400) regardless of fingerprint, then
+            # bind it to the fingerprint's actual query.
+            ddl_candidate = body.sql.strip()
+            if "\n" in ddl_candidate or "\r" in ddl_candidate:
+                raise HTTPException(status_code=400, detail="DDL not on allowlist")
+            if not DDL_ALLOWLIST_REGEX.match(ddl_candidate):
+                raise HTTPException(status_code=400, detail="DDL not on allowlist")
+            if fingerprint_id not in buf:
+                raise HTTPException(status_code=404, detail="Unknown fingerprint")
+            if not _ddl_bound_to_fingerprint(ddl_candidate, sql_cache.get(fingerprint_id)):
+                raise HTTPException(
+                    status_code=400,
+                    detail="DDL does not correspond to this fingerprint",
+                )
+            ddl = ddl_candidate
         else:
-            # Look up suggestions — from cache or generated on-the-fly.
-            cached = await _get_or_generate_suggestion(fingerprint_id, worker, buf, request)
-            if cached is not None:
-                for s in cached.suggestions:
-                    if s.sql and DDL_ALLOWLIST_REGEX.match(s.sql.strip()):
-                        ddl = s.sql.strip()
-                        break
+            if fingerprint_id not in buf:
+                raise HTTPException(status_code=404, detail="Unknown fingerprint")
+            ddl = await _cached_suggestion_ddl(fingerprint_id, worker)
             if ddl is None:
                 raise HTTPException(status_code=404, detail="No applicable DDL suggestion")
 
-        # Validate against the allowlist — reject embedded newlines first.
+        # Final allowlist re-check (defense in depth) — reject newlines first.
         ddl_stripped = ddl.strip()
         if "\n" in ddl_stripped or "\r" in ddl_stripped:
             raise HTTPException(status_code=400, detail="DDL not on allowlist")
@@ -233,7 +267,7 @@ def _build_router() -> APIRouter:
         # Execute the DDL. Use AUTOCOMMIT isolation for CONCURRENTLY
         # statements which cannot run inside a transaction block.
         try:
-            async_engine = worker._engine
+            async_engine = worker.engine
             is_concurrent = "CONCURRENTLY" in ddl_stripped.upper()
             if is_concurrent:
                 async with async_engine.execution_options(

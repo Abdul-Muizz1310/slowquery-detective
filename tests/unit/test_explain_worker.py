@@ -329,6 +329,8 @@ async def test_11_queue_full_returns_false() -> None:
     assert worker.submit(_job(fid="a" * 16)) is True
     assert worker.submit(_job(fid="b" * 16)) is True
     assert worker.submit(_job(fid="c" * 16)) is False
+    # The drop is counted so backpressure is observable (audit REL-2).
+    assert worker.dropped_jobs == 1
 
 
 async def test_12_drops_do_not_affect_queued_items() -> None:
@@ -696,6 +698,11 @@ async def test_30_param_synthesizer_never_emits_ddl_looking_sql() -> None:
         assert "TRUNCATE " not in up
         assert "GRANT " not in up
         assert "REVOKE " not in up
+        # The read-only guard must also stop the captured UPDATE from ever
+        # reaching EXPLAIN (which under ANALYZE would execute it).
+        assert "UPDATE " not in up
+        assert "INSERT " not in up
+        assert "DELETE " not in up
 
 
 async def test_31_engine_passed_to_worker_is_used_for_explain() -> None:

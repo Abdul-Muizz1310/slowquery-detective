@@ -17,12 +17,60 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import sqlglot
 from sqlalchemy import text
+from sqlglot import exp
 
 from slowquery_detective.rules.base import Suggestion
 from slowquery_detective.store import StoreWriter
 
 _LOG = logging.getLogger("slowquery.worker")
+
+# Statement kinds that mutate data if they reach the server. EXPLAIN
+# (ANALYZE) *executes* its target, so any of these — including data-modifying
+# CTEs like ``WITH x AS (INSERT ... RETURNING ...) SELECT ...`` — must never
+# be run through EXPLAIN.
+_WRITE_EXPRESSIONS: tuple[type[exp.Expression], ...] = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Merge,
+)
+
+# Top-level statement types that are provably read-only. Anything else
+# (DDL, ``exp.Command`` for DO/CALL/VACUUM/raw statements, etc.) is denied.
+_READ_EXPRESSIONS: tuple[type[exp.Expression], ...] = (
+    exp.Select,
+    exp.Union,
+    exp.Intersect,
+    exp.Except,
+    exp.Subquery,
+    exp.Values,
+)
+
+
+def is_read_only_sql(canonical_sql: str, dialect: str = "postgres") -> bool:
+    """Return ``True`` only if ``canonical_sql`` is a provably read-only query.
+
+    Default-deny: any statement we cannot parse into a pure read (SELECT /
+    VALUES / set-operation of SELECTs, including read-only CTEs) is rejected.
+    This is the hard guard that stops EXPLAIN (ANALYZE) from re-executing a
+    captured INSERT/UPDATE/DELETE/CALL/DO with synthesized parameter values
+    against the live database.
+    """
+    try:
+        tree = sqlglot.parse_one(canonical_sql, dialect=dialect)
+    except Exception:
+        return False
+    if tree is None:
+        return False
+    # A data-modifying node anywhere in the tree disqualifies the statement,
+    # even when it is nested inside a CTE that resolves to a SELECT.
+    for write_type in _WRITE_EXPRESSIONS:
+        if tree.find(write_type) is not None:
+            return False
+    return isinstance(tree, _READ_EXPRESSIONS)
+
 
 # Type aliases for the rules / explainer callables.
 RulesCallable = Callable[[dict[str, Any], str], list[Suggestion]]
@@ -85,6 +133,9 @@ class ExplainWorker:
         self._cache: dict[str, CachedPlan] = {}
         # fingerprint_id -> timestamp at which EXPLAIN completed.
         self._cooldown_until: dict[str, float] = {}
+        # Count of jobs dropped because the queue was full. Surfaced at WARNING
+        # so the "dashboard goes stale during an incident" failure is visible.
+        self._dropped_jobs = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -117,11 +168,48 @@ class ExplainWorker:
             self._queue.put_nowait(job)
             return True
         except asyncio.QueueFull:
-            _LOG.debug("slowquery.worker.queue_full", extra={"fid": job.fingerprint_id})
+            self._dropped_jobs += 1
+            # WARNING, not DEBUG: a full queue means observations are being
+            # lost precisely when the system is under load.
+            _LOG.warning(
+                "slowquery.worker.queue_full",
+                extra={"fid": job.fingerprint_id, "dropped_total": self._dropped_jobs},
+            )
             return False
+
+    @property
+    def dropped_jobs(self) -> int:
+        """Total jobs dropped due to a full queue (backpressure counter)."""
+        return self._dropped_jobs
 
     def plan_cache_get(self, fingerprint_id: str) -> CachedPlan | None:
         return self._cache.get(fingerprint_id)
+
+    @property
+    def engine(self) -> Any:
+        """The async engine EXPLAIN runs against (public read-only accessor)."""
+        return self._engine
+
+    async def process_pending(self, limit: int | None = None) -> int:
+        """Drain up to ``limit`` queued jobs now; return how many were processed.
+
+        Public surface for callers (e.g. the dashboard) that need to flush
+        freshly-observed queries on demand without reaching into the private
+        queue/``_process_one`` internals. Per-job exceptions are logged, never
+        silently swallowed.
+        """
+        processed = 0
+        while limit is None or processed < limit:
+            try:
+                job = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                await self._process_one(job)
+            except Exception:
+                _LOG.error("slowquery.worker.process_error", exc_info=True)
+            processed += 1
+        return processed
 
     # ------------------------------------------------------------------
     # Queue drain loop
@@ -144,6 +232,19 @@ class ExplainWorker:
         # Cooldown gate.
         until = self._cooldown_until.get(job.fingerprint_id)
         if until is not None and self._now() < until:
+            return
+
+        # Hard read-only guard: EXPLAIN (ANALYZE) executes its target, so a
+        # captured write would run against the live DB. Drop anything that is
+        # not a provably read-only statement *before* any EXPLAIN. Set the
+        # cooldown so we don't re-parse the same non-read fingerprint in a
+        # tight loop.
+        if not is_read_only_sql(job.canonical_sql):
+            _LOG.debug(
+                "slowquery.worker.skip_non_read_only",
+                extra={"fid": job.fingerprint_id},
+            )
+            self._cooldown_until[job.fingerprint_id] = self._now() + self._cooldown
             return
 
         plan = await self._run_explain(job)
