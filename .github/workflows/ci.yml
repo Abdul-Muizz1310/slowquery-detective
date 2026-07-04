@@ -30,10 +30,27 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
-      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=80
+      # Critical-path HTTP surface (dashboard auth, DDL binding, threshold
+      # gating) is covered by ASGI-level tests that run under this filter, so
+      # the coverage gate can no longer be cleared while those modules sit
+      # near-untested. Floor raised 80 -> 90 to match.
+      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=90
+
+  # End-to-end suite against a real Postgres. testcontainers uses the Docker
+  # daemon present on GitHub-hosted ubuntu runners, so the integration tests
+  # that were previously local-only now gate merges too.
+  integration:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv sync --frozen --all-extras
+      - run: uv run pytest -m integration
 
   build:
-    needs: test
+    needs: [test, integration]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
