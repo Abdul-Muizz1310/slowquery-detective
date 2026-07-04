@@ -29,7 +29,7 @@ def detach(engine: Engine | AsyncEngine) -> None: ...
 
 1. **Per-statement timing** — duration measured with `time.perf_counter()` in `before_cursor_execute` / `after_cursor_execute`. The delta is recorded in ms via `buffer.record(fingerprint_id, duration_ms)`.
 2. **Async support** — for `AsyncEngine`, listeners attach to `engine.sync_engine` (SQLAlchemy's published pattern); no separate async listener API is exercised.
-3. **Zero propagation** — any exception inside a hook is caught, logged via `structlog`, and swallowed. The host statement still completes normally.
+3. **Zero propagation** — any exception inside a hook is caught, logged via stdlib `logging`, and swallowed. The host statement still completes normally.
 4. **Connection-local state** — the start time is attached to the `cursor.info` dict, never to a global, so concurrent connections do not race.
 5. **Nested-transaction safety** — statements executed inside SAVEPOINTs are counted once, at the leaf.
 6. **Sampling** — when `sample_rate < 1.0`, the coin flip happens *before* fingerprinting so we don't spend sqlglot cycles on dropped statements. The fingerprint skip must be deterministic per-statement (uses `random.Random` seeded once at attach, not `random.random()`).

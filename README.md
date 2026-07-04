@@ -11,7 +11,7 @@
 ![sqlalchemy](https://img.shields.io/badge/SQLAlchemy-2.0-d71f00?style=flat-square)
 ![fastapi](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![mypy](https://img.shields.io/badge/mypy-strict-blue?style=flat-square)
-![coverage](https://img.shields.io/badge/coverage-86%25-brightgreen?style=flat-square)
+![coverage](https://img.shields.io/badge/coverage-94%25-brightgreen?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
 
 ---
@@ -51,9 +51,9 @@ PII and secrets are scrubbed before they leave the process boundary. DDL applica
 flowchart LR
     A["SQLAlchemy\nhooks"] --> B["Fingerprinter\n(sqlglot)"]
     B --> C["Ring Buffer\n60s window"]
-    C --> D{"p95\nthreshold?"}
-    D -- below --> E["skip"]
-    D -- above --> F["EXPLAIN Worker\n(async, rate-limited)"]
+    B --> D{"duration_ms ≥\nthreshold_ms?"}
+    D -- below --> E["track only"]
+    D -- above --> F["EXPLAIN Worker\n(async, rate-limited,\nread-only guard)"]
     F --> G["Rules Engine\n(6 rules)"]
     G -- match --> H["Store\nSuggestion"]
     G -- no match --> I["LLM Fallback\n(OpenRouter)"]
@@ -126,12 +126,12 @@ slowquery-detective/
 │   │   ├── select_star.py
 │   │   └── n_plus_one.py
 │   ├── llm_explainer.py     # OpenRouter LLM fallback with 3-model cascade
-│   ├── store.py             # Persistence layer for fingerprints + suggestions
+│   ├── store.py             # StoreWriter interface + in-process InMemoryStoreWriter default
 │   ├── dashboard.py         # Optional FastAPI APIRouter
 │   └── middleware.py         # install() — wires everything together
 ├── docs/specs/              # 7 feature specs (Spec-TDD)
 ├── tests/
-│   ├── unit/                # 265 unit tests
+│   ├── unit/                # unit + ASGI-level composed-path tests
 │   ├── integration/         # Testcontainers Postgres tests
 │   └── fixtures/
 ├── pyproject.toml
@@ -152,7 +152,7 @@ app.include_router(dashboard_router, prefix="/_slowquery")
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/_slowquery/api/queries` | List fingerprints, sorted by `total_ms` desc |
-| `GET` | `/_slowquery/api/queries/{id}` | Detail: plan + suggestions + recent samples |
+| `GET` | `/_slowquery/api/queries/{id}` | Detail: plan + suggestions + percentile summary (`sample_count`, p50/p95/p99/max) |
 | `POST` | `/_slowquery/api/queries/{id}/apply` | Run suggested DDL (allowlist-gated, `DEMO_MODE=true` required) |
 | `GET` | `/_slowquery/api/stream` | SSE: live p95 updates per fingerprint |
 
@@ -195,22 +195,22 @@ The cascade is `PRIMARY → FAST → FALLBACK` on HTTP 429 / 5xx / network error
 | SQL parser | [sqlglot](https://github.com/tobymao/sqlglot) 25+ |
 | Validation | [pydantic](https://docs.pydantic.dev/) 2.9+ |
 | Async HTTP | [httpx](https://www.python-httpx.org/) 0.27+ |
-| Logging | [structlog](https://www.structlog.org/) 24+ |
+| Logging | stdlib `logging` |
 | Middleware | [FastAPI](https://fastapi.tiangolo.com/) 0.115+ (via `[fastapi]` extra) |
-| LLM client | [openai](https://github.com/openai/openai-python) 1.40+ pointed at OpenRouter (via `[llm]` extra) |
+| LLM client | OpenRouter REST API over [httpx](https://www.python-httpx.org/) (no extra dependency) |
 | Dev | pytest, pytest-asyncio, respx, testcontainers, hypothesis, ruff, mypy |
 
 ## 🧪 Testing
 
 | Metric | Value |
 |---|---|
-| Unit tests | 265 |
-| Integration tests | 52 |
-| Line coverage | 86% |
+| CI-run tests (`-m "not slow and not integration"`) | 312 |
+| Integration tests (testcontainers Postgres) | 53 |
+| Line coverage (CI-run tests only) | 94% |
 | Feature specs | 7 (under `docs/specs/`) |
 | Type checker | mypy strict, zero errors |
 
-The test suite is **Spec-TDD**: 7 feature specs under [`docs/specs/`](docs/specs/) list every enumerated test case, and 317 pytest items encode them — 262 of them run in CI (`-m "not slow and not integration"`), plus 52 integration tests gated on testcontainers Postgres and 6 @slow benchmark tests.
+The test suite is **Spec-TDD**: 7 feature specs under [`docs/specs/`](docs/specs/) list every enumerated test case, and 368 pytest items encode them — 312 run in CI (`-m "not slow and not integration"`, including ASGI-level tests that drive the composed dashboard/middleware path without Docker), plus 53 integration tests against a real Postgres and 6 @slow benchmark tests. The integration suite runs in CI too (testcontainers on the GitHub-hosted Docker daemon).
 
 ```bash
 uv run pytest                    # unit tests only (default)
@@ -241,13 +241,27 @@ Per-query accounting (ring buffer + rules) is ~11 µs; the only meaningful cost 
 | **Parse, don't validate** | `install()` rejects invalid config at call time; `LlmConfig` validates via Pydantic; DDL allowlist regex is the only gate |
 | **Typed everything** | mypy strict, Pydantic models at every boundary, no `Any` crossing module lines |
 
+## ⚠️ Scope & limitations
+
+**Single-process by design (for now).** All runtime state — the ring buffer,
+the EXPLAIN worker's plan cache, the per-fingerprint cooldowns, and the
+default `InMemoryStoreWriter` — lives inside one process. Under a typical
+production deployment (multiple gunicorn/uvicorn workers or replicas behind a
+load balancer) **each process sees only its own slice of traffic** and
+computes its own percentiles; the dashboard reflects whichever process served
+the request. For cross-process aggregation, subclass `StoreWriter` against a
+shared database and inject it via `install(app, engine, store=...)` (an
+asyncpg-backed implementation ships with `slowquery-demo-backend`, Phase 4b).
+Treat the built-in store as suitable for single-process apps and demos, not
+horizontally-scaled services.
+
 ## 🚀 Status
 
 | Milestone | Status |
 |---|---|
 | v0.1.0 on [PyPI](https://pypi.org/project/slowquery-detective/) | ✅ Released 2026-04-11 |
-| 265 unit + 52 integration tests, 86% coverage, mypy strict | ✅ Green |
-| `pip install slowquery-detective[fastapi,llm]` in fresh 3.12 venv | ✅ Verified |
+| 312 CI-run + 53 integration tests, 94% coverage, mypy strict | ✅ Green |
+| `pip install slowquery-detective[fastapi]` in fresh 3.12 venv | ✅ Verified |
 | Live demo ([slowquery-demo-backend](https://github.com/Abdul-Muizz1310/slowquery-demo-backend)) | 🟡 Phase 4b |
 | Dashboard ([slowquery-dashboard-frontend](https://github.com/Abdul-Muizz1310/slowquery-dashboard-frontend)) | 🟡 Phase 4c |
 

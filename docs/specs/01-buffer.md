@@ -40,7 +40,7 @@ class Percentiles(NamedTuple):
 ## Outputs / Invariants
 
 1. **Sliding window** — samples older than `window_seconds` are never counted in `percentiles(...)`.
-2. **Bounded memory** — at most `max_samples_per_key` samples live per fingerprint; beyond that, a random-index reservoir replacement is used so the p95 stays statistically representative.
+2. **Bounded memory** — at most `max_samples_per_key` samples live per fingerprint, enforced by a fixed-size `deque(maxlen=...)` that drops the **oldest** sample on overflow. (Historical note: an Algorithm-R reservoir was rejected — a uniform sample over all history keeps ancient timestamps alive and is incompatible with the 60s time-window eviction; dropping oldest is the correct order for a sliding window and keeps the most recent, spike-carrying samples.)
 3. **Thread-safe** — concurrent `record` calls on the same fingerprint from multiple threads never lose updates or raise. A single `threading.Lock` guards the per-key deque.
 4. **Isolation** — different fingerprints are independent; percentiles on one never reflect samples from another.
 5. **Empty-state** — `percentiles("unknown")` returns `None`, never raises.
@@ -64,8 +64,8 @@ class Percentiles(NamedTuple):
 6. Hard eviction — record at `now=0, 30, 60`, query at `now=121` → all three evicted, returns `None`.
 7. Empty buffer — `percentiles("never-recorded")` → `None`.
 8. Single sample of 42.0 → `Percentiles(sample_count=1, p50_ms=42, p95_ms=42, p99_ms=42, max_ms=42)`.
-9. Reservoir cap — record 10,000 samples (window not expired) with increasing values; `len(internal_samples) <= max_samples_per_key`; `p95` is still representative (within 10% of expected).
-10. `max_samples_per_key=1` with 100 samples → always holds exactly one; percentiles reflect the reservoir-chosen sample.
+9. Maxlen cap — record 10,000 samples (window not expired) with increasing values; `len(internal_samples) <= max_samples_per_key`; because the deque keeps the most recent samples, `p95` reflects the newest window and stays high.
+10. `max_samples_per_key=1` with 100 samples → always holds exactly one (the most recent); percentiles reflect that sample.
 11. `clear("fp1")` then `percentiles("fp1")` → `None`; other fingerprints untouched.
 12. `clear()` with no argument wipes every key.
 13. `keys()` returns a `frozenset` snapshot; mutation of the buffer after does not mutate the returned set.

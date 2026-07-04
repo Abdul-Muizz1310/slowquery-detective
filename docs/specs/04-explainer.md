@@ -120,7 +120,7 @@ All HTTP calls are mocked via `respx` (recorded fixtures for the happy path, han
 
 ### Security
 
-27. API key never appears in structlog output. Asserted by capturing log records and grep-asserting the secret string is absent.
+27. API key never appears in log output. Asserted by capturing log records and grep-asserting the secret string is absent.
 28. The request body sent to OpenRouter contains `canonical_sql` but does **not** contain any literal like `'sk-live-'` or raw personal data. (Guaranteed by fingerprint step but re-asserted.)
 29. The system prompt is loaded from a constant in the module; no user-controlled string is ever interpolated into it.
 30. `temperature` capped at `0.3` — a `LlmConfig(temperature=0.9)` raises `ValidationError` at config time.

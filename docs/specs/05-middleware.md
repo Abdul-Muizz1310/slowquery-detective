@@ -45,7 +45,7 @@ app.include_router(dashboard_router, prefix="/_slowquery")
 
 ```
 GET  /api/queries                          # list fingerprints sorted by total_ms desc
-GET  /api/queries/{fingerprint_id}         # detail: plan + suggestions + recent samples
+GET  /api/queries/{fingerprint_id}         # detail: plan + suggestions + percentile summary
 POST /api/queries/{fingerprint_id}/apply   # run the suggested DDL (allowlisted only)
 GET  /api/stream                           # SSE: live p95 per fingerprint
 ```
