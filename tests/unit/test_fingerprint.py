@@ -221,3 +221,35 @@ def test_28_property_no_literal_survives_in_canonical(literal: str) -> None:
     sql = f"SELECT * FROM t WHERE name = '{literal}'"
     _, canon = fingerprint(sql)
     assert literal not in canon
+
+
+# ---------------------------------------------------------------------------
+# OPT-1 — the sqlglot parse is memoized on the hot path.
+# ---------------------------------------------------------------------------
+
+
+def test_29_repeated_calls_hit_the_lru_cache() -> None:
+    from slowquery_detective.fingerprint import _fingerprint_cached
+
+    _fingerprint_cached.cache_clear()
+    sql = "SELECT * FROM orders WHERE user_id = $1 AND created_at > $2"
+    first = fingerprint(sql)
+    before = _fingerprint_cached.cache_info()
+    # Re-issuing the identical parameterized template must not re-parse.
+    for _ in range(50):
+        assert fingerprint(sql) == first
+    after = _fingerprint_cached.cache_info()
+    assert after.hits - before.hits == 50
+    assert after.misses == before.misses  # no new parses
+
+
+def test_30_cache_bounded_and_still_correct_after_eviction() -> None:
+    from slowquery_detective.fingerprint import _fingerprint_cached
+
+    _fingerprint_cached.cache_clear()
+    # Distinct templates well beyond maxsize must not corrupt results.
+    for i in range(3000):
+        fingerprint(f"SELECT * FROM t{i} WHERE id = ?")
+    # Re-computable identically even after eviction pressure.
+    assert fingerprint("SELECT * FROM t0 WHERE id = ?")[1] == "select * from t0 where id = ?"
+    assert _fingerprint_cached.cache_info().maxsize == 2048

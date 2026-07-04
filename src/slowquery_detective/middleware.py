@@ -20,6 +20,8 @@ import logging
 import time
 from typing import Any
 
+import httpx
+
 import slowquery_detective.hooks as _hooks_mod
 from slowquery_detective.buffer import RingBuffer
 from slowquery_detective.explain import ExplainJob, ExplainWorker
@@ -28,7 +30,7 @@ from slowquery_detective.llm_explainer import LlmConfig
 from slowquery_detective.llm_explainer import explain as llm_explain
 from slowquery_detective.rules import run_rules
 from slowquery_detective.rules.base import Suggestion
-from slowquery_detective.store import StoreWriter
+from slowquery_detective.store import InMemoryStoreWriter, StoreWriter
 
 _LOG = logging.getLogger("slowquery.middleware")
 
@@ -42,6 +44,7 @@ def install(
     threshold_ms: int = 100,
     sample_rate: float = 1.0,
     store_url: str | None = None,
+    store: StoreWriter | None = None,
     enable_llm: bool = False,
     llm_config: LlmConfig | None = None,
 ) -> None:
@@ -69,7 +72,11 @@ def install(
         return
 
     buffer = RingBuffer()
-    store = StoreWriter(store_url or _engine_url(engine))
+    # Default to the process-local in-memory store so the worker actually
+    # persists (rather than raising NotImplementedError on every job). Callers
+    # that need cross-process aggregation inject their own StoreWriter.
+    if store is None:
+        store = InMemoryStoreWriter(store_url or _engine_url(engine))
 
     def _rules_adapter(
         plan: dict[str, Any],
@@ -83,8 +90,13 @@ def install(
         )
 
     explainer = None
+    llm_client: httpx.AsyncClient | None = None
     if enable_llm and llm_config is not None:
         cfg = llm_config  # capture for closure
+        # One keep-alive client reused across cascades (audit OPT-3) instead
+        # of a fresh TCP+TLS handshake to OpenRouter on every LLM fallback.
+        llm_client = httpx.AsyncClient()
+        client = llm_client  # capture for closure
 
         async def _explainer(
             canonical_sql: str,
@@ -97,6 +109,7 @@ def install(
                 plan_json,
                 config=cfg,
                 fingerprint_id=fingerprint_id,
+                client=client,
             )
 
         explainer = _explainer
@@ -113,12 +126,20 @@ def install(
     canonical_sql_cache: dict[str, str] = {}
 
     def _on_record(fp_id: str, canonical_sql: str, duration_ms: float) -> None:
-        """Submit an explain job for every observed query.
+        """Submit an explain job only for queries that crossed the threshold.
 
-        The worker's per-fingerprint cooldown ensures we don't re-run EXPLAIN
-        for the same fingerprint more than once per cooldown window.
+        Per ``docs/specs/05-middleware.md`` item 8 the middleware owns the
+        slow-query decision: EXPLAIN is spent only when
+        ``duration_ms >= threshold_ms``. Fast queries are still fingerprinted
+        and tracked in the ring buffer (so their percentiles show up in the
+        dashboard) but never trigger a background EXPLAIN. The worker's
+        per-fingerprint cooldown then bounds re-runs of slow fingerprints.
         """
+        # Always remember the canonical SQL so the dashboard can attribute a
+        # fingerprint even before an EXPLAIN has run.
         canonical_sql_cache[fp_id] = canonical_sql
+        if duration_ms < threshold_ms:
+            return
         job = ExplainJob(
             fingerprint_id=fp_id,
             canonical_sql=canonical_sql,
@@ -154,6 +175,15 @@ def install(
         _hooks_mod.detach(engine)
         await worker.stop()
         buffer.clear()
+        if llm_client is not None:
+            try:
+                await llm_client.aclose()
+            except Exception:
+                _LOG.debug("slowquery.middleware.llm_client_close_error", exc_info=True)
+        try:
+            await store.close()
+        except Exception:
+            _LOG.debug("slowquery.middleware.store_close_error", exc_info=True)
 
     app.router.add_event_handler("startup", _on_startup)
     app.router.add_event_handler("shutdown", _on_shutdown)

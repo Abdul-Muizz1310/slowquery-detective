@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from functools import lru_cache
 
 import sqlglot
 from sqlglot import exp
@@ -61,6 +62,20 @@ def fingerprint(sql: str, dialect: str = "postgres") -> tuple[str, str]:
     if not sql or not sql.strip():
         raise ValueError("sql must not be empty")
 
+    return _fingerprint_cached(sql, dialect)
+
+
+@lru_cache(maxsize=2048)
+def _fingerprint_cached(sql: str, dialect: str) -> tuple[str, str]:
+    """Memoized core of :func:`fingerprint` (pure of ``(sql, dialect)``).
+
+    The sqlglot parse dominates per-query overhead (~0.3-0.7 ms vs ~1 us for
+    the buffer record; see ``benchmarks/report.md``), and SQLAlchemy emits a
+    small set of stable parameterized statement templates, so a bounded LRU
+    turns the hot-path cost into a dict lookup on the common repeated-template
+    case (audit OPT-1). Validation lives in :func:`fingerprint` so bad input
+    is never cached.
+    """
     canonical = _canonicalize_via_sqlglot(sql, dialect)
     if canonical is None:
         canonical = _canonicalize_via_regex(sql)

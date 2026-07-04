@@ -2,9 +2,8 @@
 
 Talks directly to the OpenRouter REST API via httpx. We deliberately avoid
 the ``openai`` client here so the cascade logic, cooldown, and JSON
-validation live in one readable place; the ``openai`` extra stays in
-pyproject for users who already have it installed but the package itself
-only needs httpx.
+validation live in one readable place; ``httpx`` is already a core
+dependency, so no extra package is needed for the LLM fallback.
 
 Behavior contract:
 
@@ -60,6 +59,12 @@ class LlmConfig(BaseSettings):
     temperature: float = Field(default=0.1, ge=0.0, le=0.3)
     min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
     per_fingerprint_cooldown_seconds: float = Field(default=60.0, gt=0.0)
+    # Per-model HTTP timeout and a hard ceiling on the *total* cascade wall
+    # time across all three models. The deadline stops one slow fingerprint
+    # (all models timing out) from blocking the single drain worker for
+    # ~3x15s (audit REL-2).
+    per_model_timeout_seconds: float = Field(default=15.0, gt=0.0)
+    cascade_deadline_seconds: float = Field(default=20.0, gt=0.0)
 
     @field_validator("temperature")
     @classmethod
@@ -93,12 +98,17 @@ async def explain(
     config: LlmConfig,
     fingerprint_id: str,
     now: float | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> Suggestion | None:
     """Ask an OpenRouter model to diagnose a slow plan; return a Suggestion.
 
     Returns ``None`` when disabled, when no API key is set, when the cooldown
     is active, when the model abstains, or when the upstream call fails.
     Never raises on upstream failures — logs and returns ``None``.
+
+    ``client`` lets the caller pass a reused, keep-alive
+    :class:`httpx.AsyncClient` (see ``install()``); when omitted an ephemeral
+    client is created for the single cascade.
     """
     if not isinstance(plan_json, dict):
         raise TypeError("plan_json must be a dict")
@@ -114,7 +124,7 @@ async def explain(
     if last is not None and current - last < config.per_fingerprint_cooldown_seconds:
         return None
 
-    suggestion = await _cascade(canonical_sql, plan_json, config)
+    suggestion = await _cascade(canonical_sql, plan_json, config, client=client)
 
     if suggestion is not None:
         _COOLDOWN[fingerprint_id] = current
@@ -126,16 +136,45 @@ async def _cascade(
     canonical_sql: str,
     plan_json: dict[str, Any],
     config: LlmConfig,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> Suggestion | None:
-    """Try PRIMARY -> FAST -> FALLBACK; return a Suggestion or None."""
-    models = (config.model_primary, config.model_fast, config.model_fallback)
+    """Try PRIMARY -> FAST -> FALLBACK; return a Suggestion or None.
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    The cascade advances to the next model on *any* retriable failure
+    (network error, timeout, 429, 5xx, and — per audit REL-1 — any non-401
+    4xx such as an unknown model slug or a model that rejects
+    ``response_format:json_object``). Only 401 (auth) is terminal.
+
+    A single deadline (``cascade_deadline_seconds``) bounds the *total* wall
+    time across all three models so one slow fingerprint can't head-of-line
+    block the drain worker (audit REL-2).
+    """
+    import time as _time
+
+    models = (config.model_primary, config.model_fast, config.model_fallback)
+    deadline = config.cascade_deadline_seconds
+    start = _time.monotonic()
+
+    own_client = client is None
+    if client is None:
+        client = httpx.AsyncClient()
+    try:
         for model in models:
-            outcome = await _call_model(client, model, canonical_sql, plan_json, config)
+            remaining = deadline - (_time.monotonic() - start)
+            if remaining <= 0:
+                _LOG.warning("slowquery.llm.cascade_deadline_exceeded")
+                return None
+            timeout = min(config.per_model_timeout_seconds, remaining)
+            outcome = await _call_model(
+                client, model, canonical_sql, plan_json, config, timeout=timeout
+            )
             if outcome.retry:
                 continue
             return outcome.suggestion
+    finally:
+        if own_client:
+            await client.aclose()
 
     _LOG.warning("slowquery.llm.cascade_exhausted")
     return None
@@ -155,6 +194,8 @@ async def _call_model(
     canonical_sql: str,
     plan_json: dict[str, Any],
     config: LlmConfig,
+    *,
+    timeout: float = 15.0,
 ) -> _CallOutcome:
     """Single-model call. Returns retry=True on retriable failures."""
     assert config.api_key is not None  # Guarded by ``explain``.
@@ -175,7 +216,7 @@ async def _call_model(
     }
 
     try:
-        response = await client.post(url, headers=headers, json=body)
+        response = await client.post(url, headers=headers, json=body, timeout=timeout)
     except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError):
         _LOG.debug("slowquery.llm.network_failure", extra={"model": model})
         return _CallOutcome(retry=True, suggestion=None)
@@ -186,10 +227,16 @@ async def _call_model(
     if response.status_code == 401:
         _LOG.error("slowquery.llm.auth_failure")
         return _CallOutcome(retry=False, suggestion=None)
-    if response.status_code == 429 or response.status_code >= 500:
-        return _CallOutcome(retry=True, suggestion=None)
     if response.status_code != 200:
-        return _CallOutcome(retry=False, suggestion=None)
+        # Any other non-2xx (429, 5xx, and — audit REL-1 — a non-401 4xx such
+        # as an unknown model slug or a model that rejects
+        # response_format:json_object) is retriable within the cascade so the
+        # next model gets a chance. Log the status per model for diagnosis.
+        _LOG.debug(
+            "slowquery.llm.http_status",
+            extra={"model": model, "status": response.status_code},
+        )
+        return _CallOutcome(retry=True, suggestion=None)
 
     try:
         payload = response.json()

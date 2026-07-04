@@ -1,18 +1,25 @@
 """Ring buffer + percentile computation — see ``docs/specs/01-buffer.md``.
 
-Sliding 60s window per fingerprint with a reservoir cap for bounded memory
-under sustained high QPS. Thread-safe via a single lock guarding per-key
-deques. All timing uses an injected ``now`` for determinism in tests;
-production callers leave ``now=None`` and ``time.monotonic()`` is used.
+Sliding 60s window per fingerprint. Memory stays bounded by a fixed-size
+``deque(maxlen=max_samples_per_key)`` that drops the *oldest* sample when
+full — a recency-biased cap that is the correct shape for a sliding window
+(the newest observations are exactly the ones a p95 spike lives in). We
+deliberately do **not** use Algorithm-R reservoir sampling: a uniform
+sample over all history keeps ancient timestamps alive and is fundamentally
+incompatible with time-window eviction (see COR-1 in the audit).
+
+Thread-safe via a single lock guarding per-key deques. All timing uses an
+injected ``now`` for determinism in tests; production callers leave
+``now=None`` and ``time.monotonic()`` is used.
 """
 
 from __future__ import annotations
 
 import math
-import random
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
 from typing import NamedTuple
 
 
@@ -41,13 +48,6 @@ class RingBuffer:
         self._max_samples_per_key = int(max_samples_per_key)
         self._lock = threading.Lock()
         self._samples: dict[str, deque[tuple[float, float]]] = {}
-        # Random source is seeded per-instance so tests running in parallel
-        # don't see cross-test interference. ``random.Random()`` uses os
-        # entropy by default; we accept that non-determinism for the
-        # reservoir replacement policy.
-        self._rng = random.Random()
-        # Counter per key for reservoir sampling (Algorithm R).
-        self._seen: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,21 +69,13 @@ class RingBuffer:
         with self._lock:
             samples = self._samples.get(fingerprint_id)
             if samples is None:
-                samples = deque()
+                # ``maxlen`` gives us a fixed memory ceiling that drops the
+                # oldest sample on overflow — the right eviction order for a
+                # sliding window.
+                samples = deque(maxlen=self._max_samples_per_key)
                 self._samples[fingerprint_id] = samples
-                self._seen[fingerprint_id] = 0
 
-            seen = self._seen[fingerprint_id] + 1
-            self._seen[fingerprint_id] = seen
-
-            if len(samples) < self._max_samples_per_key:
-                samples.append((timestamp, float(duration_ms)))
-            else:
-                # Reservoir replacement (Algorithm R): pick a random slot
-                # in the first ``max_samples_per_key`` items to replace.
-                idx = self._rng.randrange(seen)
-                if idx < self._max_samples_per_key:
-                    samples[idx] = (timestamp, float(duration_ms))
+            samples.append((timestamp, float(duration_ms)))
 
     def percentiles(
         self,
@@ -97,19 +89,22 @@ class RingBuffer:
             if samples is None:
                 return None
 
-            # Evict expired samples from the front of the deque. Reservoir
-            # replacement can leave old timestamps in the middle too, so
-            # compact the survivors into a fresh list.
-            live = [d for t, d in samples if t >= cutoff]
-            # Keep the deque in sync so we don't re-iterate dead entries.
-            samples.clear()
-            for d in live:
-                samples.append((cutoff + 1e-9, d))  # placeholder timestamp
+            # Evict expired samples, preserving each survivor's *real*
+            # arrival timestamp. Overwriting timestamps here (as an earlier
+            # version did with a shared ``cutoff + 1e-9`` sentinel) collapses
+            # the sliding window to "since the last read" — a sample recorded
+            # at t=0 would vanish on the very next percentiles() call.
+            live = [(t, d) for t, d in samples if t >= cutoff]
+            if len(live) != len(samples):
+                # Compact the deque so expired entries can't resurrect on a
+                # later call with a backwards clock. ``clear`` keeps maxlen.
+                samples.clear()
+                samples.extend(live)
 
             if not live:
                 return None
 
-            return _compute_percentiles(live)
+            return _compute_percentiles([d for _t, d in live])
 
     def keys(self) -> frozenset[str]:
         with self._lock:
@@ -119,10 +114,17 @@ class RingBuffer:
         with self._lock:
             if fingerprint_id is None:
                 self._samples.clear()
-                self._seen.clear()
             else:
                 self._samples.pop(fingerprint_id, None)
-                self._seen.pop(fingerprint_id, None)
+
+    def __contains__(self, fingerprint_id: object) -> bool:
+        """Membership test used by the dashboard (``fid in buffer``)."""
+        with self._lock:
+            return fingerprint_id in self._samples
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate a *snapshot* of fingerprint ids (safe against mutation)."""
+        return iter(self.keys())
 
     # ------------------------------------------------------------------
     # Helpers

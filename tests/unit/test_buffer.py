@@ -273,3 +273,66 @@ def test_25_memory_sanity_10k_fingerprints() -> None:
         for j in range(100):
             buf.record(f"fp_{i}", float(j), now=0.0)
     assert len(buf.keys()) == 10_000
+
+
+# ---------------------------------------------------------------------------
+# Regression: sliding-window must not collapse on repeated reads (audit
+# CRITICAL "RingBuffer sliding window collapses on the second percentiles()").
+# ---------------------------------------------------------------------------
+
+
+def test_26_repeated_percentiles_do_not_evict_live_sample() -> None:
+    """A sample recorded at t=0 (window=60) must survive repeated reads.
+
+    The old implementation re-stamped survivors with ``cutoff + 1e-9``, so
+    the second percentiles() call within the window evicted them. Assert the
+    sample lives across many quick successive reads, is still present at
+    t=59, and only disappears at t=61.
+    """
+    buf = RingBuffer(window_seconds=60.0)
+    buf.record("fp", 5.0, now=0.0)
+    # Many rapid reads within the window must all see the sample.
+    for now in (1.0, 1.0, 2.0, 2.0, 3.0):
+        p = buf.percentiles("fp", now=now)
+        assert p is not None and p.sample_count == 1
+    # Still alive just inside the window.
+    p59 = buf.percentiles("fp", now=59.0)
+    assert p59 is not None and p59.sample_count == 1
+    # Gone just past the window.
+    assert buf.percentiles("fp", now=61.0) is None
+
+
+def test_27_original_timestamps_preserved_across_reads() -> None:
+    """Two samples at different times keep independent expiry after a read."""
+    buf = RingBuffer(window_seconds=60.0)
+    buf.record("fp", 1.0, now=0.0)
+    buf.record("fp", 2.0, now=40.0)
+    # Read at t=50: both live.
+    assert buf.percentiles("fp", now=50.0).sample_count == 2  # type: ignore[union-attr]
+    # Read at t=70: the t=0 sample expired (70-60=10 > 0), the t=40 one lives.
+    p = buf.percentiles("fp", now=70.0)
+    assert p is not None and p.sample_count == 1
+    assert p.max_ms == 2.0
+
+
+def test_28_maxlen_keeps_most_recent_samples() -> None:
+    """Overflow drops the oldest sample, not a random one."""
+    buf = RingBuffer(max_samples_per_key=3)
+    for i in range(1, 6):
+        buf.record("fp", float(i), now=0.0)
+    p = buf.percentiles("fp", now=0.0)
+    assert p is not None and p.sample_count == 3
+    # Most-recent three are 3.0, 4.0, 5.0.
+    assert p.max_ms == 5.0
+    assert p.p50_ms == 4.0
+
+
+def test_29_contains_and_iter_protocol() -> None:
+    """The dashboard relies on ``fid in buffer`` and ``for fid in buffer``."""
+    buf = RingBuffer()
+    buf.record("a", 1.0, now=0.0)
+    buf.record("b", 2.0, now=0.0)
+    assert "a" in buf
+    assert "b" in buf
+    assert "missing" not in buf
+    assert set(buf) == {"a", "b"}

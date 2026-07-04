@@ -153,13 +153,18 @@ async def test_12_apply_allowed_ddl_executes(
 ) -> None:
     transport = httpx.ASGITransport(app=app_with_slowquery)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        # Force a fingerprint + suggestion first.
+        # Observe the query so its fingerprint + canonical SQL are tracked.
         async with engine.connect() as conn:
             await conn.execute(text("SELECT * FROM orders WHERE user_id = 1"))
         await asyncio.sleep(0.5)
         qs = (await client.get("/_slowquery/api/queries")).json()
         fid = qs[0]["fingerprint_id"]
-        resp = await client.post(f"/_slowquery/api/queries/{fid}/apply")
+        # The one-click apply supplies the suggested DDL, which must be
+        # allowlisted AND bound to the fingerprint's actual table/columns.
+        resp = await client.post(
+            f"/_slowquery/api/queries/{fid}/apply",
+            json={"sql": "CREATE INDEX IF NOT EXISTS ix_orders_user_id ON orders(user_id);"},
+        )
     assert resp.status_code == 200
 
 
@@ -378,14 +383,15 @@ async def test_28_apply_rate_limited_per_fingerprint(
     app_with_slowquery: FastAPI, engine: AsyncEngine
 ) -> None:
     transport = httpx.ASGITransport(app=app_with_slowquery)
+    ddl = {"sql": "CREATE INDEX IF NOT EXISTS ix_orders_user_id ON orders(user_id);"}
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT * FROM orders WHERE user_id = 1"))
         await asyncio.sleep(0.5)
         qs = (await client.get("/_slowquery/api/queries")).json()
         fid = qs[0]["fingerprint_id"]
-        first = await client.post(f"/_slowquery/api/queries/{fid}/apply")
-        second = await client.post(f"/_slowquery/api/queries/{fid}/apply")
+        first = await client.post(f"/_slowquery/api/queries/{fid}/apply", json=ddl)
+        second = await client.post(f"/_slowquery/api/queries/{fid}/apply", json=ddl)
     assert first.status_code == 200
     assert second.status_code == 429
 
@@ -415,7 +421,36 @@ async def test_30_apply_response_echoes_executed_ddl(
         await asyncio.sleep(0.5)
         qs = (await client.get("/_slowquery/api/queries")).json()
         fid = qs[0]["fingerprint_id"]
-        resp = await client.post(f"/_slowquery/api/queries/{fid}/apply")
+        resp = await client.post(
+            f"/_slowquery/api/queries/{fid}/apply",
+            json={"sql": "CREATE INDEX IF NOT EXISTS ix_orders_user_id ON orders(user_id);"},
+        )
     body = resp.json()
     assert "executed_sql" in body
     assert "CREATE INDEX" in body["executed_sql"]
+
+
+# ---------------------------------------------------------------------------
+# Threshold gating (negative test — audit CRITICAL: threshold_ms was never
+# consulted, so every query was queued for EXPLAIN regardless of speed).
+# ---------------------------------------------------------------------------
+
+
+async def test_31_fast_query_below_threshold_never_explained(
+    engine: AsyncEngine, demo_env: None
+) -> None:
+    app = FastAPI()
+    # An absurdly high threshold: no real query is this slow, so nothing
+    # should ever be submitted for EXPLAIN.
+    install(app, engine, threshold_ms=100_000)
+    async with engine.connect() as conn:
+        for _ in range(5):
+            await conn.execute(text("SELECT * FROM orders WHERE user_id = 1"))
+    await asyncio.sleep(0.5)
+    buf = app.state.slowquery_buffer
+    worker = app.state.slowquery_worker
+    # The fast query is still tracked in the buffer...
+    assert len(buf.keys()) >= 1
+    # ...but no fingerprint ever received an EXPLAIN plan.
+    for fid in buf:
+        assert worker.plan_cache_get(fid) is None

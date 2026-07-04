@@ -507,8 +507,12 @@ async def test_llm_http_error_is_retriable():
 
 
 @respx.mock
-async def test_llm_non_200_non_retriable_returns_none():
-    """Line 192: status != 200 and not 401/429/5xx => retry=False, suggestion=None."""
+async def test_llm_non_200_4xx_is_retriable_across_cascade():
+    """A non-401 4xx (e.g. 403) is retriable so the cascade tries every model.
+
+    (Audit REL-1: previously a single 4xx on the primary aborted the whole
+    PRIMARY->FAST->FALLBACK cascade — this asserts the corrected behavior.)
+    """
     BASE = "https://openrouter.ai/api/v1"
     route = respx.post(f"{BASE}/chat/completions").mock(return_value=httpx.Response(403))
     cfg = LlmConfig(
@@ -526,8 +530,8 @@ async def test_llm_non_200_non_retriable_returns_none():
         now=0.0,
     )
     assert s is None
-    # 403 is not retriable, so only primary is called (no cascade)
-    assert route.call_count == 1
+    # 403 is retriable, so all three models are attempted before giving up.
+    assert route.call_count == 3
 
 
 @respx.mock

@@ -166,6 +166,46 @@ def test_install_with_llm_config() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_on_record_gates_submit_on_threshold(monkeypatch: Any) -> None:
+    """Fast queries (< threshold_ms) must never be submitted for EXPLAIN.
+
+    Audit CRITICAL: threshold_ms was validated + stored but never consulted,
+    so every observed query was queued regardless of speed. This drives the
+    real middleware ``_on_record`` closure captured off ``attach`` and asserts
+    the gate.
+    """
+    import slowquery_detective.middleware as mw
+    from slowquery_detective import install
+
+    captured: dict[str, Any] = {}
+
+    def _fake_attach(
+        engine: Any, buffer: Any, *, sample_rate: float = 1.0, on_record: Any = None
+    ) -> None:
+        captured["on_record"] = on_record
+
+    monkeypatch.setattr(mw, "attach", _fake_attach)
+
+    engine = _mock_engine()
+    app = FastAPI()
+    install(app, engine, threshold_ms=100)
+
+    worker = app.state.slowquery_worker
+    submitted: list[Any] = []
+    monkeypatch.setattr(worker, "submit", lambda job: submitted.append(job) or True)
+
+    on_record = captured["on_record"]
+    # Below threshold: tracked in the canonical cache but NOT submitted.
+    on_record("fp_fast", "select 1", 50.0)
+    assert submitted == []
+    assert app.state.slowquery_canonical_sql_cache["fp_fast"] == "select 1"
+
+    # At/above threshold: submitted for EXPLAIN.
+    on_record("fp_slow", "select 2", 150.0)
+    assert len(submitted) == 1
+    assert submitted[0].fingerprint_id == "fp_slow"
+
+
 async def test_shutdown_handler_detaches_and_stops_worker() -> None:
     from slowquery_detective import install
 

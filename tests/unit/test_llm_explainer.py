@@ -449,3 +449,109 @@ def test_30_temperature_cap_enforced_at_config_time() -> None:
             model_fallback=FALLBACK,
             temperature=0.9,
         )
+
+
+# ---------------------------------------------------------------------------
+# REL-1 — a non-401 4xx on the primary must NOT abort the cascade.
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_rel1_404_on_primary_cascades_to_fast() -> None:
+    route = respx.post(f"{BASE}/chat/completions")
+    route.side_effect = [
+        httpx.Response(404),  # e.g. unknown model slug on the primary
+        httpx.Response(200, json=_openrouter_body()),
+    ]
+    s = await explain(CANONICAL, PLAN, config=_config(), fingerprint_id=FID, now=0.0)
+    assert s is not None
+    assert route.call_count == 2
+    second_body = json.loads(route.calls[1].request.content.decode())
+    assert second_body["model"] == FAST
+
+
+@respx.mock
+async def test_rel1_400_on_primary_cascades() -> None:
+    route = respx.post(f"{BASE}/chat/completions")
+    route.side_effect = [
+        httpx.Response(400),  # model rejects response_format:json_object
+        httpx.Response(400),
+        httpx.Response(200, json=_openrouter_body()),
+    ]
+    s = await explain(CANONICAL, PLAN, config=_config(), fingerprint_id=FID, now=0.0)
+    assert s is not None
+    assert route.call_count == 3
+
+
+@respx.mock
+async def test_rel1_all_4xx_exhausts_to_none(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+    respx.post(f"{BASE}/chat/completions").mock(return_value=httpx.Response(403))
+    s = await explain(CANONICAL, PLAN, config=_config(), fingerprint_id=FID, now=0.0)
+    assert s is None
+    assert any("cascade_exhausted" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# REL-2 — a single deadline bounds total cascade wall-time.
+# ---------------------------------------------------------------------------
+
+
+class _SlowClient:
+    """Stub AsyncClient whose every request sleeps ``delay`` seconds."""
+
+    def __init__(self, delay: float, status: int = 429) -> None:
+        self.delay = delay
+        self.status = status
+        self.timeouts: list[float] = []
+
+    async def post(self, url: str, *, headers: Any, json: Any, timeout: float) -> httpx.Response:
+        self.timeouts.append(timeout)
+        import asyncio
+
+        await asyncio.sleep(self.delay)
+        return httpx.Response(self.status)
+
+    async def aclose(self) -> None:  # pragma: no cover - not exercised (own_client=False)
+        return None
+
+
+async def test_rel2_cascade_stops_at_total_deadline() -> None:
+    import time as _time
+
+    client = _SlowClient(delay=0.15)
+    cfg = _config(cascade_deadline_seconds=0.25, per_model_timeout_seconds=15.0)
+    t0 = _time.monotonic()
+    s = await explain(
+        CANONICAL,
+        PLAN,
+        config=cfg,
+        fingerprint_id=FID,
+        now=0.0,
+        client=client,  # type: ignore[arg-type]
+    )
+    elapsed = _time.monotonic() - t0
+    assert s is None
+    # With a 0.25s deadline and 0.15s/call, only the first two models are
+    # attempted; the third is skipped once the deadline is blown.
+    assert len(client.timeouts) < 3
+    # Total wall time stays close to the deadline, not 3x per-model.
+    assert elapsed < 0.6
+    # Each per-call timeout is bounded by the remaining budget.
+    assert all(t <= 0.25 + 1e-6 for t in client.timeouts)
+
+
+async def test_rel2_per_call_timeout_capped_by_config() -> None:
+    """Per-model timeout never exceeds ``per_model_timeout_seconds``."""
+    client = _SlowClient(delay=0.0)
+    cfg = _config(per_model_timeout_seconds=2.0, cascade_deadline_seconds=60.0)
+    await explain(
+        CANONICAL,
+        PLAN,
+        config=cfg,
+        fingerprint_id=FID,
+        now=0.0,
+        client=client,  # type: ignore[arg-type]
+    )
+    assert client.timeouts
+    assert all(t <= 2.0 for t in client.timeouts)
