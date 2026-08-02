@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from typing import Any
 
 import httpx
@@ -291,9 +292,12 @@ async def test_apply_rate_limited_second_call(demo_env: None) -> None:
 
 async def test_list_queries_entry_without_live_percentiles(demo_env: None) -> None:
     buf = RingBuffer()
-    # Recorded long ago (now=0.0) so it's evicted by the time we read at real
-    # monotonic time — the fingerprint is still listed, just without stats.
-    buf.record(FID, 5.0, now=0.0)
+    # Recorded far outside the 60s sliding window so it is evicted by the time we
+    # read at real monotonic time — the fingerprint is still listed, just without
+    # stats. Anchor to time.monotonic() rather than 0.0: on Linux monotonic counts
+    # from boot, so a CI runner starting a job within 60s of boot would leave a
+    # now=0.0 sample still inside the window and the entry would keep its stats.
+    buf.record(FID, 5.0, now=time.monotonic() - 600.0)
     app, _ = _make_app(buffer=buf)
     async with _client(app) as c:
         resp = await c.get("/_slowquery/api/queries")
