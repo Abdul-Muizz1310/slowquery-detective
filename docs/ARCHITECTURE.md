@@ -142,10 +142,10 @@ middleware → (hooks | buffer | explain_worker | store | dashboard)
 
 | Layer | Count | Runs in CI? |
 |---|---|---|
-| Unit (`tests/unit/`) | 265 | Yes (default filter: `-m "not slow and not integration"`) |
-| Integration (`tests/integration/`) | 52 | No -- needs testcontainers Postgres, run locally via `uv run pytest -m integration` |
+| Unit (`tests/unit/`) | 325 | Yes (default filter: `-m "not slow and not integration"`) |
+| Integration (`tests/integration/`) | 53 | No -- needs testcontainers Postgres, run locally via `uv run pytest -m integration` |
 | Slow (`@pytest.mark.slow`) | 6 | No -- benchmark-style, run via `uv run pytest -m slow` |
-| **Total** | **317** | |
+| **Total** | **381** | |
 
 The critical-path HTTP surface (dashboard auth, DDL binding, detail shape) is exercised in CI by ASGI-level tests (`tests/unit/test_dashboard_asgi.py`) that drive the composed router against a real `RingBuffer` and a fake worker/engine — no Postgres required — so these paths are no longer only covered by the Docker-gated integration suite. The testcontainers integration tests (`tests/integration/`) remain the end-to-end layer against a real database and are run locally via `uv run pytest -m integration` (or in CI with a Postgres service).
 

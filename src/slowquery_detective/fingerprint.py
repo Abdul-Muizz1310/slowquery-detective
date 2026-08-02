@@ -69,7 +69,7 @@ def fingerprint(sql: str, dialect: str = "postgres") -> tuple[str, str]:
 def _fingerprint_cached(sql: str, dialect: str) -> tuple[str, str]:
     """Memoized core of :func:`fingerprint` (pure of ``(sql, dialect)``).
 
-    The sqlglot parse dominates per-query overhead (~0.3-0.7 ms vs ~1 us for
+    The sqlglot parse dominates per-query overhead (~0.3-0.7 ms vs ~0.5 us for
     the buffer record; see ``benchmarks/report.md``), and SQLAlchemy emits a
     small set of stable parameterized statement templates, so a bounded LRU
     turns the hot-path cost into a dict lookup on the common repeated-template

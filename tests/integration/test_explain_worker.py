@@ -7,6 +7,7 @@ These need a real Postgres (testcontainers) to run EXPLAIN against.
 from __future__ import annotations
 
 import asyncio
+import statistics
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -228,26 +229,49 @@ async def test_28_explain_canonical_sql_has_no_original_literal(
 
 @pytest.mark.slow
 async def test_33_submit_overhead_under_10us(engine: AsyncEngine) -> None:
+    """Spec case 33 (``docs/specs/06-explain-worker.md``): "with the worker
+    running but the queue empty, the hook's ``submit`` call adds ≤ 10 µs".
+
+    The queue is sized to hold every job this loop submits, which is what the
+    spec case describes. The earlier form of this test used the default 256-slot
+    queue and never drained it, so 9,744 of its 10,000 iterations took the
+    ``QueueFull`` branch — which emits a WARNING log per drop. It was therefore
+    timing the drop-and-log path (~80 µs/call on this host, i.e. failing the
+    budget for a reason the budget was never about) rather than the enqueue.
+    Backpressure has its own coverage: case 11 in
+    ``tests/unit/test_explain_worker.py`` asserts the drop behaviour directly.
+
+    The job is built once, outside the timed loop, so the number is the cost of
+    ``submit`` itself. The median of batches is used so a single GC pause or
+    scheduler preemption on a busy CI runner cannot flip the assertion.
+    """
+    rounds, batch = 10, 1_000
     worker = ExplainWorker(
         engine=engine,
         store=_NullStore(),
         rules=_empty_rules,
         explainer=None,
+        max_queue_size=rounds * batch,
     )
     await worker.start()
-    t0 = time.perf_counter()
-    for _ in range(10_000):
-        worker.submit(
-            ExplainJob(
-                fingerprint_id=FID,
-                canonical_sql="SELECT 1",
-                observed_ms=500.0,
-                enqueued_at=0.0,
-            )
-        )
-    elapsed = time.perf_counter() - t0
+    job = ExplainJob(
+        fingerprint_id=FID,
+        canonical_sql="SELECT 1",
+        observed_ms=500.0,
+        enqueued_at=0.0,
+    )
+    per_call_samples: list[float] = []
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        for _ in range(batch):
+            worker.submit(job)
+        per_call_samples.append((time.perf_counter() - t0) / batch)
     await worker.stop()
-    per_call = elapsed / 10_000
+
+    # Zero drops is the proof that we measured the spec's scenario: had the
+    # queue filled, the remaining calls would have taken the warning-log path.
+    assert worker.dropped_jobs == 0, "queue filled — this no longer measures case 33"
+    per_call = statistics.median(per_call_samples)
     assert per_call < 10e-6, f"submit overhead {per_call * 1e6:.1f}µs (budget 10µs)"
 
 

@@ -24,8 +24,10 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       # Re-run the unit suite as a pre-publish gate. Publishing a broken
-      # artifact is much harder to undo than failing a workflow run.
-      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=80
+      # artifact is much harder to undo than failing a workflow run. The floor
+      # tracks ci.yml's merge gate: a looser gate on the path that ships to
+      # users than on the path that merges to main is the wrong way round.
+      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=90
       - run: uv build
       - name: Publish to TestPyPI
         env:
@@ -45,7 +47,8 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
-      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=80
+      # Same floor as ci.yml's merge gate — see the testpypi job.
+      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=90
       - run: uv build
       - name: Publish to PyPI
         env:

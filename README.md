@@ -204,13 +204,13 @@ The cascade is `PRIMARY → FAST → FALLBACK` on HTTP 429 / 5xx / network error
 
 | Metric | Value |
 |---|---|
-| CI-run tests (`-m "not slow and not integration"`) | 312 |
+| CI-run tests (`-m "not slow and not integration"`) | 325 |
 | Integration tests (testcontainers Postgres) | 53 |
 | Line coverage (CI-run tests only) | 94% |
 | Feature specs | 7 (under `docs/specs/`) |
 | Type checker | mypy strict, zero errors |
 
-The test suite is **Spec-TDD**: 7 feature specs under [`docs/specs/`](docs/specs/) list every enumerated test case, and 368 pytest items encode them — 312 run in CI (`-m "not slow and not integration"`, including ASGI-level tests that drive the composed dashboard/middleware path without Docker), plus 53 integration tests against a real Postgres and 6 @slow benchmark tests. The integration suite runs in CI too (testcontainers on the GitHub-hosted Docker daemon).
+The test suite is **Spec-TDD**: 7 feature specs under [`docs/specs/`](docs/specs/) list every enumerated test case, and 381 pytest items encode them — 325 run in CI (`-m "not slow and not integration"`, including ASGI-level tests that drive the composed dashboard/middleware path without Docker), plus 53 integration tests against a real Postgres and 6 @slow benchmark tests. The integration suite runs in CI too (testcontainers on the GitHub-hosted Docker daemon).
 
 ```bash
 uv run pytest                    # unit tests only (default)
@@ -224,12 +224,13 @@ Hot-path overhead, measured with no database (reproduce: `uv run python benchmar
 
 | Operation | µs/op |
 |---|--:|
-| Ring buffer `record` | ~0.8 |
-| Ring buffer `percentiles` (1024-sample window) | ~0.5 |
-| Rules engine (6 rules over a plan) | ~10 |
-| Fingerprint (sqlglot) — flat `SELECT` … 2-table JOIN | ~334 … 743 |
+| Ring buffer `record` | ~0.46 |
+| Fingerprint — LRU hit (a statement shape already seen) | ~0.18 |
+| Fingerprint — cold `sqlglot` parse, flat `SELECT` … 2-table JOIN | ~303 … 697 |
+| Rules engine (6 rules over a plan) — background worker, not per query | ~9.8 |
+| Ring buffer `percentiles` (1024-sample window) — dashboard read, not per query | ~85 |
 
-Per-query accounting (ring buffer + rules) is ~11 µs; the only meaningful cost is the `sqlglot` fingerprint parse (~0.2–0.7 ms, scaling with query complexity), which stays under the library's ≤1 ms/statement overhead budget. Numbers are from `Windows-11 / Python 3.12.12`; re-run on your target.
+The per-query hot path is a fingerprint plus a ring-buffer record: **~0.64 µs** once a statement shape is in the fingerprint LRU, and ~0.3–0.7 ms the first time a shape is seen (a real `sqlglot` parse, which stays under the library's ≤1 ms/statement overhead budget). The rules engine runs on the background EXPLAIN worker and `percentiles` only on a dashboard render, so neither is on the request path. Measured 2026-08-02 on `Windows-11 / Python 3.12.12`, fastest of 8 consecutive runs on a host that was busy with other work (the run-to-run spread reached 3.9x — see [`benchmarks/report.md`](benchmarks/report.md)); re-run on your target.
 
 ## 🧭 Engineering philosophy
 
@@ -260,7 +261,7 @@ horizontally-scaled services.
 | Milestone | Status |
 |---|---|
 | v0.1.0 on [PyPI](https://pypi.org/project/slowquery-detective/) | ✅ Released 2026-04-11 |
-| 312 CI-run + 53 integration tests, 94% coverage, mypy strict | ✅ Green |
+| 325 CI-run + 53 integration tests, 94% coverage, mypy strict | ✅ Green |
 | `pip install slowquery-detective[fastapi]` in fresh 3.12 venv | ✅ Verified |
 | Live demo ([slowquery-demo-backend](https://github.com/Abdul-Muizz1310/slowquery-demo-backend)) | 🟡 Phase 4b |
 | Dashboard ([slowquery-dashboard-frontend](https://github.com/Abdul-Muizz1310/slowquery-dashboard-frontend)) | 🟡 Phase 4c |

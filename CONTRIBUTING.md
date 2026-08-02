@@ -27,7 +27,7 @@ uv run ruff check .           # verify lint
 
 ## Project architecture
 
-The package lives under `src/slowquery_detective/` and is organized into 9 modules, each with a single responsibility:
+The package lives under `src/slowquery_detective/` and is organized into 10 modules, each with a single responsibility:
 
 | Module | Responsibility |
 |---|---|
@@ -236,7 +236,7 @@ DDL application via the dashboard API requires `DEMO_MODE=true` as an environmen
    uv run pytest --cov=slowquery_detective
    ```
 5. **Push and open a PR** — CI will run lint, types, unit tests, coverage, and build
-6. Coverage must stay at or above 80% on `src/slowquery_detective`
+6. Coverage must stay at or above 90% on `src/slowquery_detective`
 
 ---
 

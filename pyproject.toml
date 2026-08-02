@@ -58,7 +58,6 @@ dev = [
     "asyncpg>=0.30",
     "hypothesis>=6.115",
     "mypy>=1.13",
-    "polyfactory>=2.18",
     "psycopg2-binary>=2.9.11",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -66,6 +65,10 @@ dev = [
     "respx>=0.21",
     "ruff>=0.8",
     "testcontainers[postgres]>=4.8",
+    # Reserved for the unchecked acceptance criterion in
+    # docs/specs/04-explainer.md:132 (a committed cassette of a real OpenRouter
+    # happy-path call, replayed under `pytest.mark.slow`). Unimported today on
+    # purpose — do not prune it as dead until that criterion is dropped or met.
     "vcrpy>=6.0",
 ]
 
