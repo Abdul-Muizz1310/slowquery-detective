@@ -20,7 +20,7 @@ jobs:
       url: https://test.pypi.org/project/slowquery-detective/
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       # Re-run the unit suite as a pre-publish gate. Publishing a broken
@@ -44,7 +44,7 @@ jobs:
       url: https://pypi.org/project/slowquery-detective/
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       # Same floor as ci.yml's merge gate — see the testpypi job.
