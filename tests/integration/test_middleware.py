@@ -355,15 +355,39 @@ async def test_24_sse_never_leaks_raw_sql(app_with_slowquery: FastAPI, engine: A
 async def test_25_query_samples_redact_params(
     app_with_slowquery: FastAPI, engine: AsyncEngine
 ) -> None:
+    """The bound literal must never reach the detail response's SQL-bearing fields.
+
+    Scoped deliberately. The old form asserted ``"42" not in str(detail)`` over the
+    whole payload, but ``percentiles`` carries raw timing floats — a p95 of
+    1.3078869999958442 contains "42" and failed the test for reasons that have
+    nothing to do with redaction. That made every PR randomly red.
+
+    So: use a literal wide enough not to collide by chance, assert ``percentiles``
+    is numeric-only (which is what makes excluding it from the scan sound, and
+    fails loudly if a string field is ever added there), and scan everything else.
+    """
+    literal = "987654321"
     async with engine.connect() as conn:
-        await conn.execute(text("SELECT * FROM orders WHERE user_id = :u"), {"u": 42})
+        await conn.execute(text("SELECT * FROM orders WHERE user_id = :u"), {"u": int(literal)})
     await asyncio.sleep(0.3)
     transport = httpx.ASGITransport(app=app_with_slowquery)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         qs = (await client.get("/_slowquery/api/queries")).json()
         detail = (await client.get(f"/_slowquery/api/queries/{qs[0]['fingerprint_id']}")).json()
-    payload = str(detail)
-    assert "42" not in payload  # literal redacted in samples
+
+    percentiles = detail.pop("percentiles", None)
+    if percentiles is not None:
+        non_numeric = {
+            key: value
+            for key, value in percentiles.items()
+            if not isinstance(value, (int, float)) or isinstance(value, bool)
+        }
+        assert non_numeric == {}, (
+            "percentiles must expose only numeric aggregates; a non-numeric field "
+            f"could carry an unredacted literal and is not covered here: {non_numeric}"
+        )
+
+    assert literal not in str(detail)  # literal redacted in samples
 
 
 async def test_26_unauth_requests_rejected_outside_demo(
