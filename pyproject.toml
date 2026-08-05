@@ -76,6 +76,14 @@ dev = [
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.format]
+# Ruff >= 0.16 formats Python fenced in Markdown. Our specs and README use code
+# blocks as prose: deliberately column-aligned trailing comments, and fragments
+# that are illustrative rather than runnable. Reformatting them collapses the
+# alignment the spec is communicating with, so Markdown is not ours to format.
+# Format-only exclusion — linting is unaffected.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "SIM", "RUF"]
 ignore = ["E501", "RUF012", "RUF006"]
