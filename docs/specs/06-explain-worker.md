@@ -1,5 +1,15 @@
 # 06 — Explain worker
 
+> **0.2.0 changes** (see [`07-fleet-observability.md`](07-fleet-observability.md) cases 28-33):
+> `ExplainJob` carries the driver-level `statement`, its `parameters` and `recent_call_count`;
+> invariant 5 (the parameter synthesizer) is replaced by `EXPLAIN (FORMAT JSON)` on the real
+> parameters, without `ANALYZE`; 5b (read-only guard) stays; 6 (plan cache, `plan_cache_get`,
+> `CachedPlan`) is removed — the store is the source of truth; 7 passes `fingerprint_id` and
+> `recent_call_count` to the rules; 9 adds submit gating (a fingerprint that is queued or cooling
+> down is not queued) and thread-safe submission. Cases 1-3 and 6 now assert store writes instead
+> of the cache; 16 no longer retries without `ANALYZE`; 24-28 and 30 (synthesizer) are replaced
+> by spec 07 cases 28-30; 29 now also covers the scrubbed plan and the LLM's input.
+
 ## Goal
 
 An async background task that pulls slow-fingerprint events off an in-process queue, runs `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` against a dedicated engine (read replica or the app engine in single-DB mode), caches the resulting plan per fingerprint, feeds it to the rules engine and — on a miss — the LLM explainer, and persists everything to the store. Rate-limited per fingerprint so a noisy endpoint can't run `EXPLAIN ANALYZE` in a tight loop (which would double the real query's latency every time).

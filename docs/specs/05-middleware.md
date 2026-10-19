@@ -1,5 +1,13 @@
 # 05 — Middleware & dashboard router
 
+> **Superseded in 0.2.0 by [`07-fleet-observability.md`](07-fleet-observability.md)** for the
+> public API (`service`, `store`, `authorize`, `mount_path`, `retention_s`), the routes (the
+> `dashboard_router` with `/api/queries`, `/apply` and `/stream` is removed; `install()` mounts
+> `GET {mount_path}/queries` and `GET {mount_path}/queries/{id}`), invariants 1, 3, 4, 5, 9 and
+> 10, and cases 1-6 and 12-30. Still in force, as re-tested by spec 07: idempotent install (2),
+> argument validation (7-11, extended), LLM wiring (7), threshold propagation (8) and clean
+> shutdown (6, 20-22, now through the wrapped lifespan). This file is kept as the 0.1 record.
+
 ## Goal
 
 A 3-line public integration that wires every previous slice — fingerprinting, ring buffer, SQLAlchemy hooks, rules engine, LLM fallback, and store writer — onto a FastAPI app. Optionally mount a read-only dashboard API router for the Next.js frontend to consume. Must refuse to execute arbitrary DDL; the "apply" action is strictly scoped to a hard-coded allowlist.

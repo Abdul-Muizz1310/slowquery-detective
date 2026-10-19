@@ -1,5 +1,13 @@
 # 02 — SQLAlchemy event hooks
 
+> **0.2.0 changes** (see [`07-fleet-observability.md`](07-fleet-observability.md) cases 19-23):
+> invariant 4 now stores the start time as an attribute of the statement's SQLAlchemy
+> `ExecutionContext`, not in `cursor.info` (asyncpg's cursor has none); sampling (invariant 6)
+> applies only to statements run outside a tagged request; `attach(on_record=...)` passes one
+> `Observation` (fingerprint, canonical SQL, duration, driver statement and parameters,
+> `executemany`, request id). Case 20 now reads: the hook never logs or stringifies parameters;
+> it passes the reference on, and only a slow statement's EXPLAIN job uses it.
+
 ## Goal
 
 Wire `before_cursor_execute` and `after_cursor_execute` listeners onto a SQLAlchemy `Engine` (or `AsyncEngine`) so every statement is timed, fingerprinted, and pushed into the ring buffer. The hooks must add negligible overhead on the happy path, catch and log any failure without poisoning the host request, and work identically for sync and async engines.

@@ -1,5 +1,10 @@
 # 03 — Rules engine
 
+> **0.2.0 note:** plans now come from `EXPLAIN (FORMAT JSON)` without `ANALYZE` (see
+> [`07-fleet-observability.md`](07-fleet-observability.md) §EXPLAIN), so `Actual …` fields are
+> absent and rules decide on the planner's estimates. The worker now calls the rules with the
+> real `fingerprint_id` and the fingerprint's 60-second call count, which is what the N+1 rule reads.
+
 ## Goal
 
 A deterministic, pure set of rules that inspects an `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` plan plus the canonical SQL and returns at most one concrete suggestion per rule. Rules cover the common-case wins (80% of real speedups are boring: missing indexes, sequential scans on filtered tables, sort-without-index, function-wrapped WHERE columns, SELECT * on wide tables, and N+1 patterns). When no rule matches, the caller falls back to the LLM explainer (see `04-explainer.md`).
