@@ -78,6 +78,11 @@ Exported from `slowquery_detective`: `install`, `StoreWriter`, `InMemoryStoreWri
    (they copy the context at creation).
 3. The library's own background tasks (the flush loop and the `EXPLAIN` worker) run in a fresh, empty
    context, so nothing they execute is attributed to a request, whenever they were started.
+3b. Requests to the library's own routes (`mount_path` and below, after `root_path`) are never tagged:
+   a caller measuring request R sends `X-Request-Id: R` on the measure call too, and what runs during
+   that call (the `authorize` hook's own queries, say) must not change R's numbers.
+3c. Middleware the host adds *after* `install` wraps outside the tagger, so its statements are not
+   attributed; call `install` after the host's own `add_middleware` calls.
 
 ### Recording (`hooks.py`, `recorder.py`)
 
@@ -95,6 +100,9 @@ Exported from `slowquery_detective`: `install`, `StoreWriter`, `InMemoryStoreWri
    1,000 slow samples. Beyond a bound the observation is dropped and counted; the flush logs the drop
    count at WARNING. A failed flush keeps its batch and merges it into the next one under the same
    bounds.
+9b. Canonical SQL is persisted and served, so the fingerprinter replaces every literal form: plain,
+   dollar-quoted (`$$..$$`, `$tag$..$tag$`), escape (`E'..'`), hex, bit, unicode and national strings,
+   on the sqlglot path and on the regex fallback.
 10. `merge_batches(a, b)` is pure: calls and totals add, `max_ms` is the larger, `first_seen` the earlier,
     `last_seen` the later, percentiles come from the newer batch when it has them, samples keep the
     newest up to the bound.
@@ -151,11 +159,17 @@ Exported from `slowquery_detective`: `install`, `StoreWriter`, `InMemoryStoreWri
     only after a flush that wrote something — an idle service never wakes its database.
 22. If the store cannot start (database asleep or unreachable), the error is logged at ERROR, the app
     keeps serving, pending data is held (bounded) and the start is retried on the next flush.
+22b. A flush that is cancelled mid-write (shutdown, a cancelled read, the final flush's timeout) puts
+    its batch back for the next flush (at-least-once: a write that committed just before the
+    cancellation is counted twice).
+22c. The in-memory store keeps at most 10,000 fingerprints (least recently seen evicted with their
+    samples and request rows), 100 samples per fingerprint and 50,000 request rows; the worker's
+    cooldown map drops expired entries once it holds 10,000.
 
 ### Routes (`router.py`), mounted at `mount_path`
 
 23. Every route depends on `authorize`. `None` ⇒ 403. The hook returning anything but `True` ⇒ 403.
-    An `HTTPException` it raises propagates (so a host may answer 401); any other exception ⇒ logged,
+    An `HTTPException` (FastAPI's or Starlette's) it raises propagates (so a host may answer 401); any other exception ⇒ logged,
     403. Authorization runs before query-parameter validation, so an unauthorized caller learns nothing
     from a 422.
 24. `GET /queries?request_id=&since=&limit=` → `list[QueryRow]`, local pending data flushed first.
@@ -307,10 +321,18 @@ Exported from `slowquery_detective`: `install`, `StoreWriter`, `InMemoryStoreWri
 53. Shutdown flushes what is pending; no library task is left running; the host engine still works.
 54. Two lifespans on one app: the hooks are attached in both; three `TestClient` blocks (three event
     loops) each process an EXPLAIN job.
+55. A measure call carrying `X-Request-Id: R` is not itself attributed to R; the `/_slowquery` prefix
+    is excluded from tagging, with and without a `root_path` (unit).
+56. Dollar-quoted, escape, hex, bit, unicode and national string literals never reach the canonical
+    SQL (unit, both fingerprint paths).
+57. A cancelled flush keeps its batch; `stop()` during a slow write still writes it in the final flush.
+58. The LLM fallback still works in a second lifespan (integration, OpenRouter mocked).
+59. In-memory fingerprint eviction takes the fingerprint's samples and request rows with it; the
+    cooldown map is pruned.
 
 ## Acceptance criteria
 
-- [ ] Cases 1–54 pass; integration cases run in CI (`pytest -m integration`, Testcontainers).
+- [ ] Cases 1–59 pass; integration cases run in CI (`pytest -m integration`, Testcontainers).
 - [ ] ruff, ruff format, mypy `--strict` clean.
 - [ ] Branch coverage on in CI; no module under 85 %.
 - [ ] README: fleet install in three lines with an `authorize` hook, migration notes from 0.1, every
