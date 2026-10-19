@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
 from slowquery_detective.plan_scrub import scrub_expression, scrub_plan
 
 

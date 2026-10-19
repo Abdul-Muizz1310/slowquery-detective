@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from slowquery_detective.store_url import normalise_store_url
 
 

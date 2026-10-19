@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
 from slowquery_detective.recorder import (
     EMPTY_BATCH,
     Batch,
