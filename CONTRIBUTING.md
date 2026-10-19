@@ -27,20 +27,27 @@ uv run ruff check .           # verify lint
 
 ## Project architecture
 
-The package lives under `src/slowquery_detective/` and is organized into 10 modules, each with a single responsibility:
+The package lives under `src/slowquery_detective/`, one responsibility per module:
 
 | Module | Responsibility |
 |---|---|
-| `__init__.py` | Public surface — exports `install()` and `dashboard_router` |
+| `__init__.py` | Public surface — `install()`, the stores, the response models, `current_request_id` |
+| `middleware.py` | `install()` — validates every argument, then wires everything onto the FastAPI app and `AsyncEngine` |
+| `tagging.py` | `X-Request-Id` parsing, the request-id context variable, the ASGI middleware, untagged task spawning |
+| `hooks.py` | SQLAlchemy listeners: time each statement on its execution context, fingerprint it, record it, hand an `Observation` to the runtime |
 | `fingerprint.py` | SQL fingerprinting via sqlglot. Scrubs literals (PII/secrets never leave the process), collapses query patterns into stable fingerprint IDs |
-| `buffer.py` | Ring buffer with a 60-second sliding window. Tracks per-fingerprint latency and computes p50/p95/p99 in constant memory |
-| `hooks.py` | SQLAlchemy event listeners. Hooks into `before_cursor_execute` / `after_cursor_execute` to time every statement |
-| `explain.py` | Async EXPLAIN worker. Runs `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` off the request path with per-fingerprint rate limiting |
+| `buffer.py` | Ring buffer with a 60-second sliding window: p50/p95/p99 and window counts in constant memory |
+| `recorder.py` | Bounded in-memory aggregation between flushes (`Batch`, the pure `merge_batches`) |
+| `runtime.py` | The imperative shell: hook callback, flush loop, store readiness, retention sweep, start/stop |
+| `explain.py` | Background `EXPLAIN (FORMAT JSON)` on the statement's real parameters (never `ANALYZE`), read-only guard, per-fingerprint cooldown |
+| `plan_scrub.py` | Pure removal of literal values from a plan before it is stored or sent to an LLM |
 | `rules/` | 6-rule deterministic engine. Each rule is a pure function of `(plan, canonical_sql, fingerprint_id, recent_call_count)` |
-| `llm_explainer.py` | OpenRouter LLM fallback with a 3-model cascade (primary, fast, fallback). Per-fingerprint cooldown prevents credit burn |
-| `store.py` | Persistence layer for fingerprints, EXPLAIN plans, and suggestions |
-| `dashboard.py` | Optional FastAPI `APIRouter` — query list, detail, DDL apply (allowlist-gated), SSE stream |
-| `middleware.py` | `install()` function — wires all components onto the FastAPI app and SQLAlchemy `AsyncEngine` |
+| `llm_explainer.py` | OpenRouter fallback with a 3-model cascade (free models by default) and a per-fingerprint cooldown |
+| `store.py` | The `StoreWriter` interface and `InMemoryStoreWriter` |
+| `pg_store.py` | `PostgresStoreWriter`: schema `slowquery`, idempotent DDL, batched upserts, reads, sweep |
+| `store_url.py` | Pure Postgres URL validation and asyncpg normalisation |
+| `schemas.py` | Response models (`QueryRow`, `QueryDetail`, …) |
+| `router.py` | `GET /queries` and `GET /queries/{id}` behind the host's `authorize` hook |
 
 ---
 
@@ -145,9 +152,11 @@ This project follows **Spec-TDD**:
 
 | Marker | What it covers | Requires | Runs in CI |
 |---|---|---|---|
-| *(none)* | Unit tests — pure logic, mocked I/O | Nothing | Yes |
-| `integration` | Real Postgres via testcontainers | Docker | No (local only) |
-| `slow` | Benchmark-style, end-to-end | Docker | No (local only) |
+| *(none)* | Unit tests — pure logic, ASGI-level route tests, the in-memory store contract | Nothing | Yes (`test` job) |
+| `integration` | Real Postgres via testcontainers: the Postgres store contract, hooks on asyncpg, the composed fleet flow | Docker | Yes (`integration` job, together with the unit tier, per-module branch-coverage floor 85 %) |
+| `slow` | Benchmark-style | Docker for some | No (local only) |
+
+A store change must keep both stores passing `tests/store_contract.py`.
 
 ### Running tests locally
 
@@ -209,19 +218,21 @@ These are non-negotiable. PRs that weaken these guarantees will not be merged.
 
 The fingerprinter replaces all SQL literals with placeholders before they enter the system. PII and secrets **never leave the process boundary**. If you modify the fingerprinter, verify this invariant with explicit test cases.
 
-### DDL allowlist
+### Real parameters stay in memory
 
-The dashboard's `/apply` endpoint gates DDL execution behind a strict regex. Only statements matching `CREATE INDEX [CONCURRENTLY] IF NOT EXISTS ix_<table>_<col>` are allowed. The allowlist regex lives in `dashboard.py`. Do not widen it without a spec and thorough review.
+The EXPLAIN worker plans a slow statement with its real parameters, so the plan prints their values. `plan_scrub.scrub_plan` must run on every plan before it is stored or sent to an LLM, and driver errors are logged by exception class only (their messages can quote a parameter). Never log `Observation.parameters` or `ExplainJob.parameters`.
+
+### EXPLAIN never executes its target
+
+The worker runs `EXPLAIN (FORMAT JSON)` — never `ANALYZE` — and the read-only guard (`explain.is_read_only_sql`) refuses anything that is not provably a read. Do not add `ANALYZE` back without a spec and a review: it executes the statement.
 
 ### Identifier validation
 
 Rules that interpolate identifiers (table names, column names) into generated DDL must validate them against `IDENTIFIER_RE` (`^[A-Za-z_][A-Za-z0-9_]*$`). If validation fails, the rule abstains rather than emitting potentially-injectable SQL. See `rules/base.py`.
 
-### DEMO_MODE gate
+### Routes need the host's authorization
 
-DDL application via the dashboard API requires `DEMO_MODE=true` as an environment variable. This is an intentional safety net for production deployments.
-
----
+Every route depends on the `authorize` hook passed to `install()`; no hook means 403. Do not add a route that bypasses it, and do not add a route that writes to the host database.
 
 ## PR process
 

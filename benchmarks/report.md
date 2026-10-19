@@ -1,19 +1,32 @@
 # Benchmarks — hot-path overhead
 
-Exactly two things run synchronously on the request path, both inside the
-SQLAlchemy `after_cursor_execute` listener in `hooks.py`:
+What runs synchronously on the request path is the pair of SQLAlchemy
+listeners in `hooks.py` (`before_cursor_execute` / `after_cursor_execute`).
+For a recorded statement the `after` listener does three pieces of work:
 
 1. `fingerprint(statement)` — memoized on `(sql, dialect)` via a bounded LRU
 2. `RingBuffer.record(...)`
+3. `Recorder.observe(...)` (since 0.2.0, through `Runtime.observe`) — the
+   pending fingerprint aggregate, plus the per-request aggregate when the
+   statement runs under an `X-Request-Id`
 
 plus, only for a statement that crossed `threshold_ms`, a non-blocking
 `ExplainWorker.submit(...)` queue put (budgeted separately by test case 33 in
 `tests/integration/test_explain_worker.py`).
 
+The three parts are timed alone, and the **listener pair itself** is timed end
+to end (`hook listeners`): the real `before` and `after` closures, attached to a
+never-connected engine and wired to a real `Runtime` exactly as `install()`
+wires them, called directly. That row is the per-statement cost; it is larger
+than the sum of the parts because it also includes the two clock reads, the
+execution-context bookkeeping, building the `Observation` and the calls between
+them. It excludes SQLAlchemy's own event dispatch.
+
 Everything else is **off** the hot path and is measured here only to bound what
-it costs elsewhere: `EXPLAIN` and the rules engine run on the background worker
-(`ExplainWorker._process_one`), and `RingBuffer.percentiles` is called only by
-the dashboard (`dashboard.py`), never per query.
+it costs elsewhere: `EXPLAIN` and the rules engine run on the background worker,
+the flush to the store runs on its own task every two seconds, and
+`RingBuffer.percentiles` is read once per touched fingerprint per flush, never
+per query.
 
 Reproduce with:
 
@@ -21,7 +34,80 @@ Reproduce with:
 uv run python benchmarks/bench_detective.py
 ```
 
-## Measured 2026-08-02
+## Measured 2026-10-20 (0.2.0)
+
+Host: `Linux-7.0.0-38-generic-x86_64-with-glibc2.43`, AMD Ryzen 7 PRO 5850U
+(8 cores / 16 threads), Python 3.12.14.
+
+Estimator: the **fastest** timed burst per case, with the median burst beside it
+(see the 2026-08-02 section for why). The command was run **eight consecutive
+times** on a mostly idle host (load average about 1); the table quotes the single
+quietest run (it holds 8 of the 12 per-row minima) and the last column gives
+each row's min-to-max µs/op across all eight, which spans 1.0x-1.2x.
+
+| Operation | µs/op | median burst | ops/sec | µs/op across 8 runs |
+|---|--:|--:|--:|--:|
+| `fingerprint` **cold** — simple `SELECT … WHERE` | 257.80 | 269.72 | ~3.9k | 258–265 |
+| `fingerprint` **cold** — 2-table JOIN + ORDER BY | 628.91 | 646.20 | ~1.6k | 629–646 |
+| `fingerprint` **cold** — 10-element `IN (…)` list | 351.14 | 366.17 | ~2.8k | 351–362 |
+| `fingerprint` **cold** — parse failure → regex fallback | 129.71 | 132.74 | ~7.7k | 130–135 |
+| `fingerprint` **cached** — LRU hit, simple `SELECT` | 0.14 | 0.15 | ~7.0M | 0.13–0.14 |
+| `run_rules` — all 6 rules over a plan *(worker)* | 6.98 | 7.11 | ~143k | 7.0–8.0 |
+| `RingBuffer.record` | 0.42 | 0.43 | ~2.4M | 0.42–0.48 |
+| `Recorder.observe` — untagged statement | 0.42 | 0.43 | ~2.4M | 0.42–0.49 |
+| `Recorder.observe` — tagged statement | 0.53 | 0.54 | ~1.9M | 0.53–0.61 |
+| **hook listeners, end to end — untagged** | **2.30** | 2.35 | ~436k | 2.27–2.36 |
+| **hook listeners, end to end — tagged** | **2.71** | 2.75 | ~369k | 2.67–2.80 |
+| `RingBuffer.percentiles`, 1024-sample window *(flush)* | 59.81 | 60.84 | ~16.7k | 58–61 |
+
+The cold fingerprint rows include the 0.2.0 passes that also replace
+dollar-quoted, escape, hex, bit, unicode and national string literals. The
+tagged listener row includes setting and resetting the request-id context
+variable around each call (the middleware does that once per request, not per
+statement), so it is an upper bound. Reproduced verbatim:
+
+```
+# slowquery-detective hot-path microbenchmark
+# Linux-7.0.0-38-generic-x86_64-with-glibc2.43 | Python 3.12.14
+operation                              iters    us/op min    us/op p50       ops/sec
+fingerprint:simple_select (cold)        2000        257.8       269.72         3,879
+fingerprint:join (cold)                 2000       628.91        646.2         1,590
+fingerprint:in_list (cold)              2000       351.14       366.17         2,848
+fingerprint:parse_fallback (cold)       2000       129.71       132.74         7,709
+fingerprint:simple_select (cached)     20000         0.14         0.15     7,016,116
+run_rules:6_rules                      50000         6.98         7.11       143,290
+ringbuffer:record                     200000         0.42         0.43     2,354,770
+recorder:observe (untagged)           200000         0.42         0.43     2,360,506
+recorder:observe (tagged)             200000         0.53         0.54     1,900,812
+hook listeners (untagged)             200000          2.3         2.35       435,729
+hook listeners (tagged)               200000         2.71         2.75       369,134
+ringbuffer:percentiles                 20000        59.81        60.84        16,721
+```
+
+## What this means
+
+- **On the statement shapes an app actually emits, the library adds about
+  2.3 µs to a statement (2.7 µs under a request id).** SQLAlchemy emits a
+  small, stable set of parameterized templates, so the fingerprint LRU hits;
+  the listener pair, measured end to end, is the honest per-statement figure.
+  0.1.x quoted ~0.64 µs by summing two parts (fingerprint hit + buffer record);
+  that sum left out the listener glue, and 0.2.0 adds the recorder.
+- **The first sighting of a new statement shape pays a real sqlglot parse** —
+  ~0.26 ms for a flat `SELECT` up to ~0.63 ms for a 2-table join on this host,
+  scaling with query complexity. It stays under the library's ≤1 ms/statement
+  overhead budget (`tests/integration/test_hooks.py`), and the parse-failure
+  path is the cheapest because it skips straight to the regex fallback. The
+  number of distinct shapes that can pay it is bounded by the LRU's 2048
+  entries.
+- **Neither the rules engine nor the percentile read is on the request path.**
+  `run_rules` (~7 µs) runs on the background `ExplainWorker`; `percentiles`
+  (~60 µs over a full window) runs once per touched fingerprint per flush.
+- Numbers are machine-dependent. Re-run on your target before quoting them
+  anywhere.
+
+## Earlier figures
+
+### 0.1.x — measured 2026-08-02
 
 Host: `Windows-11-10.0.26200-SP0`, AMD Ryzen 7 PRO 5850U (8 cores / 16 threads),
 Python 3.12.12.
@@ -69,7 +155,7 @@ ringbuffer:record                     200000         0.46         0.49     2,151
 ringbuffer:percentiles                 20000        85.15        96.21        11,743
 ```
 
-## What changed since the previous recorded figures (2026-06-26)
+### What changed between 2026-06-26 and 2026-08-02
 
 Two of the seven rows in the previous version of this file had drifted far
 enough that they described something other than the work they named. Both drifts
@@ -100,7 +186,7 @@ silently degenerate into an empty-window measurement again, and
 
 `run_rules` and `RingBuffer.record` were consistent with the previous figures.
 
-## What this means
+### What the 2026-08-02 figures meant (0.1.x)
 
 - **On the statement shapes an app actually emits, per-query overhead is
   effectively free.** SQLAlchemy emits a small, stable set of parameterized

@@ -4,112 +4,107 @@ Two ways to see `slowquery-detective` working.
 
 ## Option A — Minimal toy app (package-level)
 
-This is what S6 acceptance for Phase 4a proves: the PyPI release is installable, the 3-line integration works, and the dashboard router is mountable on any FastAPI app. No Docker, no external services, no LLM credits.
+Proves the release is installable, the three-line integration works, and a tagged request's queries
+can be read back. No Docker, no external services, no LLM credits: SQLite stands in for the app
+database and the in-memory store is used (no `store_url`). `EXPLAIN` is Postgres-only, so on SQLite
+the worker simply finds no plan; fingerprints, counts and request attribution all work.
 
 ### Requirements
 
 - Python 3.12+
-- `uv` (or any PEP 517 installer; uv just makes the venv boilerplate nicer)
-- A Postgres you can point at, or nothing — the minimal app works with SQLite in-memory for import smoke-testing
+- `uv` (or any PEP 517 installer)
 
 ### Script
 
 ```bash
 # 1. Fresh venv
 uv venv --python 3.12 /tmp/sq-demo
-source /tmp/sq-demo/bin/activate         # on bash
-# or: /tmp/sq-demo/Scripts/activate      # on Windows
+source /tmp/sq-demo/bin/activate
 
-# 2. Install the library from PyPI
-uv pip install "slowquery-detective[fastapi]"
+# 2. Install the library from PyPI, plus a server and the SQLite driver
+uv pip install "slowquery-detective[fastapi]" uvicorn aiosqlite
 
-# 3. Write a 15-line FastAPI app
+# 3. A small FastAPI app
 cat > /tmp/sq_app.py <<'PY'
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from slowquery_detective import install, dashboard_router
+from slowquery_detective import install
 
 app = FastAPI()
 engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
-install(app, engine)
-app.include_router(dashboard_router, prefix="/_slowquery")
 
-@app.get("/ping")
-async def ping() -> dict[str, str]:
-    return {"pong": "ok"}
+async def demo_only(request: Request) -> bool:
+    # Your real hook verifies a token; this one just checks a header.
+    return request.headers.get("x-demo-key") == "let-me-in"
+
+
+install(app, engine, service="demo", authorize=demo_only)
+
+
+@app.get("/work")
+async def work() -> dict[str, int]:
+    async with engine.connect() as conn:
+        a = (await conn.execute(text("SELECT 1 + :n"), {"n": 1})).scalar_one()
+        b = (await conn.execute(text("SELECT 1 + :n"), {"n": 2})).scalar_one()
+    return {"sum": a + b}
 PY
 
-# 4. Run it (uses uvicorn bundled with FastAPI extras)
-uv pip install uvicorn aiosqlite
+# 4. Run it
 uvicorn --app-dir /tmp sq_app:app --port 8000
 ```
 
 In a second terminal:
 
 ```bash
-curl -s http://localhost:8000/ping
-# -> {"pong":"ok"}
+curl -s -H 'X-Request-Id: demo-1' http://localhost:8000/work
+# -> {"sum":5}
 
-curl -s http://localhost:8000/_slowquery/api/queries
-# -> [] (no slow queries yet — the ping handler is too fast to cross the default 100ms threshold)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/_slowquery/queries
+# -> 403 (the authorize hook said no)
+
+curl -s -H 'x-demo-key: let-me-in' 'http://localhost:8000/_slowquery/queries?request_id=demo-1'
+# -> [{"id":"…","fingerprint":"select ? + ?","call_count":2,…,"p50_ms":null,…,"suggestions":[]}]
 ```
 
-This proves all four packaging concerns:
+This proves:
 
-1. `pip install slowquery-detective[fastapi]` succeeds from public PyPI (23+ transitive deps resolve cleanly).
-2. `from slowquery_detective import install, dashboard_router` imports without error.
-3. `install(app, engine)` on a real `AsyncEngine` wires the hooks + the explain worker.
-4. `app.include_router(dashboard_router, prefix="/_slowquery")` mounts the API surface; `/_slowquery/api/queries` responds 200.
+1. `pip install "slowquery-detective[fastapi]"` succeeds from public PyPI.
+2. `install(app, engine, service=..., authorize=...)` wires the middleware, the hooks and the routes.
+3. A request tagged `X-Request-Id: demo-1` is listed with the queries it ran (both executions of
+   the parameterized statement collapse into one fingerprint with `call_count` 2).
+4. The routes refuse callers the hook does not accept.
 
-## Option B — Full live demo (Phase 4b + 4c)
+For persistence across processes and restarts, add `store_url=<a Postgres URL>` and install the
+`postgres` extra.
 
-The "watch a query's p95 drop from 1200ms to 18ms in real time on a branch swap" experience needs the demo backend and dashboard frontend, which are separate repos:
+## Option B — Full live demo
 
-- **`slowquery-demo-backend`** ([Phase 4b](../../docs/PLAN.md#94-phase-4--slowquery-detective--slowquery-demo-backend--slowquery-dashboard-frontend)) — feathers-generated FastAPI service with a 1M-row dataset seeded across two Neon branches: `slowquery` (missing indexes) and `slowquery-fast` (correct indexes). A Locust traffic generator fires ~100 req/s to keep the dashboard lively.
-- **`slowquery-dashboard-frontend`** ([Phase 4c](../../docs/PLAN.md#94-phase-4--slowquery-detective--slowquery-demo-backend--slowquery-dashboard-frontend)) — Next.js app with Recharts for timelines, Monaco for plan viewing, and the "Apply on fast branch" button that swaps `DATABASE_URL` between the two Neon branches and watches p95 drop live.
+The "watch a query's p95 drop on a branch swap" experience needs the demo backend and dashboard
+frontend, which are separate repos:
 
-Both repos pin to a `slowquery-detective` version via their `pyproject.toml` / the demo backend's `uv.lock`. That's the whole point of the 3-repo split: the library can be iterated independently, and the demo proves the integration surface stays stable across releases.
+- **`slowquery-demo-backend`** — FastAPI service with a seeded commerce dataset across two Neon
+  branches: `slowquery` (missing indexes) and `slowquery-fast` (correct indexes). See its
+  `docs/DEVIATIONS.md` for what ships versus what was planned.
+- **`slowquery-dashboard-frontend`** — Next.js app with a fingerprint table, an EXPLAIN plan
+  viewer, a live p95 timeline and the slow/fast branch switch.
 
-## What to expect when 4b + 4c are live
-
-```
-[traffic generator] ----100 req/s----> [demo backend (Render)]
-                                              |
-                                              v
-                                       slowquery-detective
-                                              |
-                                      (fingerprint → buffer
-                                       → rules → LLM fallback)
-                                              |
-                                              v
-                                        Postgres store
-                                              |
-                 +----------SSE----------------+
-                 |
-                 v
-          [Dashboard (Vercel)]
-          - Fingerprint table (sorted by total_ms desc)
-          - Live p95 line chart (recharts)
-          - Click fingerprint → plan + rule suggestions
-          - "Apply on fast branch" button → 1200ms → 18ms live
-```
-
-The README gif target is "click Apply → watch the p95 line fall off a cliff within 3 seconds". That needs the dashboard, so it lands in 4c.
+Both pin a `slowquery-detective` version. That is the point of the split: the library iterates
+independently, and the demo proves the integration surface across releases.
 
 ## Programmatic smoke test
 
-This is what CI runs on every tag push during S5:
-
 ```python
-from slowquery_detective import install, dashboard_router, __version__
-from slowquery_detective.fingerprint import fingerprint
+from slowquery_detective import __version__, install
 from slowquery_detective.buffer import RingBuffer
+from slowquery_detective.fingerprint import fingerprint
+from slowquery_detective.plan_scrub import scrub_plan
 from slowquery_detective.rules import run_rules
-from slowquery_detective.dashboard import DDL_ALLOWLIST_REGEX
+from slowquery_detective.tagging import parse_request_id
 
-assert __version__ == "0.1.0"
+assert __version__ == "0.2.0"
 
 # Fingerprinting collapses parameterized queries.
 fp_a, _ = fingerprint("SELECT * FROM users WHERE id = 1")
@@ -125,9 +120,13 @@ assert p is not None and p.p95_ms == 5.0
 # Rules engine dispatches without errors on an empty plan.
 assert run_rules({}, "", fingerprint_id="x") == []
 
-# DDL allowlist accepts valid DDL, rejects everything else.
-assert DDL_ALLOWLIST_REGEX.match("CREATE INDEX IF NOT EXISTS ix_a ON b(c);") is not None
-assert DDL_ALLOWLIST_REGEX.match("DROP TABLE users;") is None
+# Plans lose their literal values before they are stored.
+plan = scrub_plan({"Plan": {"Filter": "(email = 'a@b.c'::text)"}})
+assert plan == {"Plan": {"Filter": "(email = ?::text)"}}
+
+# Request ids are parsed, not trusted.
+assert parse_request_id("3f2b8c1e-9a4d-4e7f-8c21-5b6a7d8e9f01") is not None
+assert parse_request_id("not ok") is None
 ```
 
-Running this against `slowquery-detective 0.1.0` from public PyPI should print nothing and exit 0.
+Running this against `slowquery-detective 0.2.0` from public PyPI prints nothing and exits 0.
