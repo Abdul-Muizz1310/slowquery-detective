@@ -336,3 +336,22 @@ def test_29_contains_and_iter_protocol() -> None:
     assert "b" in buf
     assert "missing" not in buf
     assert set(buf) == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# count() — recent calls inside the window (feeds the N+1 rule, spec 07)
+# ---------------------------------------------------------------------------
+
+
+def test_count_is_zero_for_an_unknown_fingerprint() -> None:
+    assert RingBuffer().count("nope", now=0.0) == 0
+
+
+def test_count_only_includes_samples_inside_the_window() -> None:
+    buf = RingBuffer(window_seconds=60.0)
+    for t in (0.0, 10.0, 59.0, 61.0):
+        buf.record("fp", 1.0, now=t)
+    assert buf.count("fp", now=61.0) == 3  # cutoff 1.0: t=0 is out
+    assert buf.count("fp", now=70.0) == 3  # cutoff 10.0 is inclusive: t=10 stays
+    assert buf.count("fp", now=70.5) == 2  # cutoff 10.5: t=10 is out
+    assert buf.count("fp", now=200.0) == 0

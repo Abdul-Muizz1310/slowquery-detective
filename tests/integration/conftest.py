@@ -5,8 +5,10 @@ Integration tests depend on Testcontainers Postgres (Docker). They are
 
     uv run pytest -m integration          # run only integration tests
 
-This prevents accidental 20+ minute Docker waits during normal development.
-CI uses ``pytest -m "not slow and not integration"`` so these never run there.
+This prevents accidental Docker waits during normal development. CI runs them:
+its ``integration`` job selects ``(integration or not integration) and not slow``
+(the expression names "integration", so these tests are let through) and gates
+per-module branch coverage over both tiers.
 """
 
 from __future__ import annotations

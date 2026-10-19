@@ -269,3 +269,32 @@ def test_10b_expensive_cases_are_timed_in_short_bursts(bench: ModuleType) -> Non
     assert cold.batch < cached.batch, (
         f"cold batch {cold.batch} is not shorter than cached batch {cached.batch}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 0.2.0: the recorder joined the per-statement path (spec 07 §Recording)
+# ---------------------------------------------------------------------------
+
+
+def test_09_reports_the_recorder_for_untagged_and_tagged_statements(bench: ModuleType) -> None:
+    untagged = _case(bench, "recorder:observe (untagged)")
+    tagged = _case(bench, "recorder:observe (tagged)")
+    for case in (untagged, tagged):
+        for _ in range(3):
+            case.fn()
+    batch = bench.HOT_RECORDER.drain()
+    assert batch.fingerprints, "the recorder cases recorded nothing"
+    assert batch.requests, "the tagged case did not aggregate per request"
+    assert batch.samples == (), "a hot-path case crossed the slow threshold"
+
+
+def test_10_times_the_real_listener_pair_end_to_end(bench: ModuleType) -> None:
+    """The per-statement total is measured on the attached listeners themselves
+    (before + after, Observation, Runtime.observe), not summed from parts."""
+    untagged = _case(bench, "hook listeners (untagged)")
+    tagged = _case(bench, "hook listeners (tagged)")
+    untagged.fn()
+    tagged.fn()
+    batch = bench.LISTENER_RUNTIME.recorder.drain()
+    assert batch.fingerprints, "the listener cases did not reach the recorder"
+    assert list(batch.requests) and all(rid == "req-1" for rid, _fp in batch.requests)

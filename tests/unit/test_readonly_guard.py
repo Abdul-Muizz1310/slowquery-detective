@@ -9,14 +9,12 @@ the composed worker path with a spying engine so no statement reaches the DB.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from slowquery_detective.explain import ExplainJob, ExplainWorker, is_read_only_sql
-from slowquery_detective.store import StoreWriter
+from slowquery_detective.store import InMemoryStoreWriter
 
 FID = "abcdef0123456789"
 
@@ -65,21 +63,12 @@ def test_guard_rejects_non_read_only(sql: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Composed worker path — nothing non-read-only ever reaches the engine.
+# Composed worker path — a spying engine proves nothing reaches the database.
 # ---------------------------------------------------------------------------
 
 
-def _mock_store() -> MagicMock:
-    store = MagicMock(spec=StoreWriter)
-    store.upsert_plan = AsyncMock(return_value=None)
-    store.insert_suggestions = AsyncMock(return_value=None)
-    store.upsert_fingerprint = AsyncMock(return_value=None)
-    store.record_sample = AsyncMock(return_value=None)
-    return store
-
-
 class _SpyEngine:
-    """Records every statement the worker tries to EXPLAIN."""
+    """Records every statement the worker sends to the database."""
 
     def __init__(self) -> None:
         self.seen: list[str] = []
@@ -94,8 +83,8 @@ class _SpyEngine:
             async def __aexit__(self, *_: object) -> None:
                 return None
 
-            async def execute(self, stmt: Any) -> Any:
-                seen.append(str(stmt))
+            async def exec_driver_sql(self, stmt: str, _params: Any = None) -> Any:
+                seen.append(stmt)
 
                 class _R:
                     def scalar_one(self) -> list[dict[str, Any]]:
@@ -106,16 +95,31 @@ class _SpyEngine:
         return _Conn()
 
 
+def _no_rules(*_a: Any, **_k: Any) -> list[Any]:
+    return []
+
+
+def _job(fid: str, canonical: str) -> ExplainJob:
+    return ExplainJob(
+        fingerprint_id=fid,
+        canonical_sql=canonical,
+        statement=canonical.replace("?", "$1"),
+        parameters=(1,),
+        observed_ms=500.0,
+        recent_call_count=1,
+        enqueued_at=0.0,
+    )
+
+
 async def test_worker_never_explains_writes() -> None:
     engine = _SpyEngine()
     worker = ExplainWorker(
         engine=engine,
-        store=_mock_store(),
-        rules=lambda _p, _s: [],
+        store=InMemoryStoreWriter(),
+        rules=_no_rules,
         explainer=None,
         now=lambda: 0.0,
     )
-    await worker.start()
     writes = [
         "UPDATE users SET active = ? WHERE id = ?",
         "INSERT INTO users (name) VALUES (?)",
@@ -125,42 +129,24 @@ async def test_worker_never_explains_writes() -> None:
         "CALL do_thing(?)",
     ]
     for i, sql in enumerate(writes):
-        worker.submit(
-            ExplainJob(
-                fingerprint_id=f"fp{i:014d}",
-                canonical_sql=sql,
-                observed_ms=500.0,
-                enqueued_at=0.0,
-            )
-        )
-    await asyncio.sleep(0.2)
-    await worker.stop()
+        assert worker.submit(_job(f"{i:016x}", sql)) is True
+    assert await worker.process_pending() == len(writes)
 
-    # The engine must never have been asked to execute anything.
+    # The engine must never have been asked to run anything.
     assert engine.seen == []
-    for i in range(len(writes)):
-        assert worker.plan_cache_get(f"fp{i:014d}") is None
+    # A refused statement cools down instead of being re-parsed in a loop.
+    assert all(not worker.accepts(f"{i:016x}") for i in range(len(writes)))
 
 
 async def test_worker_still_explains_selects() -> None:
     engine = _SpyEngine()
     worker = ExplainWorker(
         engine=engine,
-        store=_mock_store(),
-        rules=lambda _p, _s: [],
+        store=InMemoryStoreWriter(),
+        rules=_no_rules,
         explainer=None,
         now=lambda: 0.0,
     )
-    await worker.start()
-    worker.submit(
-        ExplainJob(
-            fingerprint_id=FID,
-            canonical_sql="SELECT * FROM orders WHERE user_id = ?",
-            observed_ms=500.0,
-            enqueued_at=0.0,
-        )
-    )
-    await asyncio.sleep(0.2)
-    await worker.stop()
-    assert any("EXPLAIN" in s.upper() for s in engine.seen)
-    assert worker.plan_cache_get(FID) is not None
+    worker.submit(_job(FID, "SELECT * FROM orders WHERE user_id = ?"))
+    await worker.process_pending()
+    assert engine.seen == ["EXPLAIN (FORMAT JSON) SELECT * FROM orders WHERE user_id = $1"]
