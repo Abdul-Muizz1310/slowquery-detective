@@ -261,6 +261,7 @@ horizontally-scaled services.
 | Milestone | Status |
 |---|---|
 | v0.1.0 on [PyPI](https://pypi.org/project/slowquery-detective/) | ✅ Released 2026-04-11 |
+| v0.1.1 on [PyPI](https://pypi.org/project/slowquery-detective/) — security fixes, see [CHANGELOG](CHANGELOG.md) | ✅ Released 2026-10-20 |
 | 325 CI-run + 53 integration tests, 94% coverage, mypy strict | ✅ Green |
 | `pip install slowquery-detective[fastapi]` in fresh 3.12 venv | ✅ Verified |
 | Live demo ([slowquery-demo-backend](https://github.com/Abdul-Muizz1310/slowquery-demo-backend)) | 🟡 Phase 4b |
