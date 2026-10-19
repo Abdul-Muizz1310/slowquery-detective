@@ -53,9 +53,10 @@ class LlmConfig(BaseSettings):
     enabled: bool = False
     api_key: SecretStr | None = None
     base_url: HttpUrl = HttpUrl("https://openrouter.ai/api/v1")
-    model_primary: str = ""
-    model_fast: str = ""
-    model_fallback: str = ""
+    # The portfolio's free OpenRouter models (never a paid default).
+    model_primary: str = "google/gemma-4-26b-a4b-it:free"
+    model_fast: str = "minimax/minimax-m3.1-flash:free"
+    model_fallback: str = "google/gemma-4-31b-it:free"
     temperature: float = Field(default=0.1, ge=0.0, le=0.3)
     min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
     per_fingerprint_cooldown_seconds: float = Field(default=60.0, gt=0.0)

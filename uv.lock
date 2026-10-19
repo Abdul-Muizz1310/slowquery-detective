@@ -1114,7 +1114,7 @@ wheels = [
 
 [[package]]
 name = "slowquery-detective"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -1128,6 +1128,9 @@ dependencies = [
 fastapi = [
     { name = "fastapi" },
     { name = "starlette" },
+]
+postgres = [
+    { name = "asyncpg" },
 ]
 
 [package.dev-dependencies]
@@ -1147,6 +1150,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.30" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic", specifier = ">=2.9" },
@@ -1155,7 +1159,7 @@ requires-dist = [
     { name = "sqlglot", specifier = ">=25.27" },
     { name = "starlette", marker = "extra == 'fastapi'", specifier = ">=0.41" },
 ]
-provides-extras = ["fastapi"]
+provides-extras = ["fastapi", "postgres"]
 
 [package.metadata.requires-dev]
 dev = [

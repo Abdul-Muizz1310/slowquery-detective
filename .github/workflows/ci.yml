@@ -34,7 +34,7 @@ jobs:
       # gating) is covered by ASGI-level tests that run under this filter, so
       # the coverage gate can no longer be cleared while those modules sit
       # near-untested. Floor raised 80 -> 90 to match.
-      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-fail-under=90
+      - run: uv run pytest -m "not slow and not integration" --cov=src/slowquery_detective --cov-branch --cov-fail-under=90
 
   # End-to-end suite against a real Postgres. testcontainers uses the Docker
   # daemon present on GitHub-hosted ubuntu runners, so the integration tests
@@ -47,7 +47,24 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
-      - run: uv run pytest -m integration
+      # Both tiers together: hooks.py and pg_store.py are exercised against
+      # a real asyncpg engine and Postgres here, not by the unit tier. The
+      # marker expression names "integration" so tests/integration/conftest.py
+      # lets the Docker-backed tests run alongside the unit tests.
+      - run: >-
+          uv run pytest -m "(integration or not integration) and not slow"
+          --cov=src/slowquery_detective --cov-branch --cov-report=term --cov-fail-under=95
+      - name: Per-module coverage floor (85 %, branch)
+        run: |
+          status=0
+          for f in $(find src/slowquery_detective -name '*.py' ! -name '__init__.py' | sort); do
+            if ! uv run coverage report --include="$f" --fail-under=85 > /dev/null; then
+              uv run coverage report --include="$f"
+              echo "::error file=$f::below the 85% per-module branch-coverage floor"
+              status=1
+            fi
+          done
+          exit $status
 
   build:
     needs: [test, integration]

@@ -1,10 +1,16 @@
-"""SQLAlchemy event listeners — see ``docs/specs/02-hooks.md``.
+"""SQLAlchemy event listeners — see ``docs/specs/02-hooks.md`` and spec 07.
 
-Attaches ``before_cursor_execute`` / ``after_cursor_execute`` to a
-SQLAlchemy ``Engine`` (or ``AsyncEngine.sync_engine``) and records
-``(fingerprint_id, duration_ms)`` pairs into a :class:`RingBuffer`. All
-hook exceptions are caught and logged — a crash inside the hook must
-never poison the host request.
+Attaches ``before_cursor_execute`` / ``after_cursor_execute`` / ``handle_error``
+to a SQLAlchemy ``Engine`` (or ``AsyncEngine.sync_engine``), records
+``(fingerprint_id, duration_ms)`` into a :class:`RingBuffer`, and hands an
+:class:`Observation` to an optional callback. All hook exceptions are caught
+and logged — a crash inside the hook must never poison the host request.
+
+The start time of a statement is an attribute of its SQLAlchemy
+``ExecutionContext`` (one per execution), not of the cursor: asyncpg's adapted
+cursor has no ``.info`` (spec 07 case 19, upstreamed from
+slowquery-demo-backend's shim 3). A statement run on behalf of a tagged
+request is always recorded; ``sample_rate`` applies to untagged statements.
 """
 
 from __future__ import annotations
@@ -12,27 +18,61 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 from sqlalchemy import event
 
 import slowquery_detective.fingerprint as _fp_mod
 from slowquery_detective.buffer import RingBuffer
+from slowquery_detective.tagging import current_request_id
 
 _LOG = logging.getLogger("slowquery.hooks")
 
-# ``cursor.info`` key used to stash per-statement start time.
-_START_KEY = "_slowquery_start"
+# ``ExecutionContext`` attribute holding the statement's start time.
+_START_ATTR = "_slowquery_start"
 
 # Sentinel attached to engines so idempotent attach/detach is cheap.
 _ATTACHED_ATTR = "_slowquery_attached"
 
-# Fallback storage for cursor adapters that lack ``.info`` (e.g. asyncpg).
-# Keyed by ``id(cursor)``; cleaned up in ``_after``.
-_CURSOR_STORE: dict[int, float | None] = {}
+
+class Observation(NamedTuple):
+    """One recorded statement, as the hook saw it.
+
+    ``statement`` and ``parameters`` are the driver-level values; they travel
+    only to the EXPLAIN worker for slow statements and are never logged or
+    stored. A ``NamedTuple`` rather than a frozen dataclass: it is built once
+    per statement on the hot path, and a frozen dataclass's ``__init__`` costs
+    about a microsecond more.
+    """
+
+    fingerprint_id: str
+    canonical_sql: str
+    duration_ms: float
+    statement: str
+    parameters: Any
+    executemany: bool
+    request_id: str | None
 
 
-OnRecordCallback = Any  # Callable[[str, str, float], None] — kept as Any to avoid circular imports
+OnRecord = Callable[[Observation], None]
+
+
+def _is_explain(statement: str) -> bool:
+    return statement.lstrip()[:7].upper() == "EXPLAIN"
+
+
+def _take_start(context: Any) -> float | None:
+    """Read and clear the start time stored on ``context``."""
+    if context is None:
+        return None
+    start: float | None = getattr(context, _START_ATTR, None)
+    if start is not None:
+        try:
+            setattr(context, _START_ATTR, None)
+        except AttributeError:
+            return None
+    return start
 
 
 def attach(
@@ -40,17 +80,16 @@ def attach(
     buffer: RingBuffer,
     *,
     sample_rate: float = 1.0,
-    on_record: OnRecordCallback | None = None,
+    on_record: OnRecord | None = None,
 ) -> None:
     """Attach slow-query listeners to ``engine``.
 
     Args:
         engine: A SQLAlchemy ``Engine`` or ``AsyncEngine``.
         buffer: The :class:`RingBuffer` to record samples into.
-        sample_rate: Fraction of statements to fingerprint (0.0..1.0).
-        on_record: Optional callback ``(fp_id, canonical_sql, duration_ms)``
-            invoked after each successful buffer record. Used by the middleware
-            to submit explain jobs.
+        sample_rate: Fraction of *untagged* statements to record (0.0..1.0).
+        on_record: Optional callback receiving an :class:`Observation` after
+            each successful buffer record.
     """
     if engine is None:
         raise ValueError("engine must not be None")
@@ -67,36 +106,22 @@ def attach(
 
     rng = random.Random(id(sync_engine))
 
-    def _set_start(cursor: Any, value: float | None) -> None:
-        """Store start time on cursor.info (psycopg2) or fallback dict (asyncpg)."""
+    def _before(
+        conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
+    ) -> None:
+        if context is None:
+            return
+        sampled_out = (
+            sample_rate < 1.0 and current_request_id() is None and rng.random() >= sample_rate
+        )
         try:
-            cursor.info[_START_KEY] = value
+            setattr(context, _START_ATTR, None if sampled_out else time.perf_counter())
         except AttributeError:
-            _CURSOR_STORE[id(cursor)] = value
+            _LOG.debug("slowquery.hooks.context_not_writable")
 
-    def _pop_start(cursor: Any) -> float | None:
-        """Retrieve and remove start time from cursor.info or fallback dict."""
-        try:
-            val: float | None = cursor.info.pop(_START_KEY, None)
-            return val
-        except AttributeError:
-            return _CURSOR_STORE.pop(id(cursor), None)
-
-    def _before(conn: Any, cursor: Any, statement: str, *_rest: Any) -> None:
-        # Sampling first — cheapest filter.
-        if sample_rate < 1.0 and rng.random() >= sample_rate:
-            _set_start(cursor, None)
-            return
-        _set_start(cursor, time.perf_counter())
-
-    def _after(conn: Any, cursor: Any, statement: str, *_rest: Any) -> None:
-        start = _pop_start(cursor)
-        if start is None:
-            return
-        # Skip EXPLAIN queries from the worker to avoid self-referential recording.
-        stripped = statement.lstrip()
-        if stripped.upper().startswith("EXPLAIN"):
-            return
+    def _record(statement: str, parameters: Any, executemany: bool, start: float) -> None:
+        if _is_explain(statement):
+            return  # the worker's own EXPLAIN, never a user query
         duration_ms = (time.perf_counter() - start) * 1000.0
         try:
             fp_id, canonical_sql = _fp_mod.fingerprint(statement)
@@ -108,34 +133,47 @@ def attach(
         except Exception:
             _LOG.error("slowquery.hooks.record_failed", exc_info=True)
             return
-        if on_record is not None:
-            try:
-                on_record(fp_id, canonical_sql, duration_ms)
-            except Exception:
-                _LOG.debug("slowquery.hooks.on_record_failed", exc_info=True)
+        if on_record is None:
+            return
+        try:
+            on_record(
+                Observation(
+                    fingerprint_id=fp_id,
+                    canonical_sql=canonical_sql,
+                    duration_ms=duration_ms,
+                    statement=statement,
+                    parameters=parameters,
+                    executemany=bool(executemany),
+                    request_id=current_request_id(),
+                )
+            )
+        except Exception:
+            _LOG.debug("slowquery.hooks.on_record_failed", exc_info=True)
+
+    def _after(
+        conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
+    ) -> None:
+        start = _take_start(context)
+        if start is not None:
+            _record(statement, parameters, executemany, start)
 
     def _on_error(exception_context: Any) -> None:
-        """Fire fingerprinting even when the query raises an error.
+        """Record a statement that raised; the error still reaches the caller.
 
-        ``handle_error`` is a :class:`DialectEvents` event; its single
-        argument is an ``ExceptionContext`` carrying the statement and
-        connection that failed. The cursor is accessed via
-        ``execution_context.cursor`` (the top-level ``cursor`` attribute
-        is not materialised on all SQLAlchemy versions).
+        ``handle_error`` receives an ``ExceptionContext``; its
+        ``execution_context`` is the same object ``_before`` stamped.
         """
-        try:
-            ec = exception_context.execution_context
-            cursor = ec.cursor if ec is not None else None
-        except AttributeError:
-            cursor = None
+        context = getattr(exception_context, "execution_context", None)
+        start = _take_start(context)
         statement = getattr(exception_context, "statement", None)
-        if cursor is not None and statement is not None:
-            conn = getattr(exception_context, "connection", None)
-            _after(conn, cursor, statement)
-        elif cursor is not None:
-            # Clean up _CURSOR_STORE even when statement is None
-            # to prevent memory leaks on connection-level errors
-            _pop_start(cursor)
+        if start is None or statement is None:
+            return
+        _record(
+            statement,
+            getattr(exception_context, "parameters", None),
+            bool(getattr(context, "executemany", False)),
+            start,
+        )
 
     event.listen(sync_engine, "before_cursor_execute", _before)
     event.listen(sync_engine, "after_cursor_execute", _after)
@@ -144,6 +182,11 @@ def attach(
     # Stash listener references on the engine so detach can remove them.
     sync_engine._slowquery_listeners = (_before, _after, _on_error)
     sync_engine._slowquery_attached = True
+
+
+def is_attached(engine: Any) -> bool:
+    """True when :func:`attach` has listeners on ``engine``."""
+    return engine is not None and bool(getattr(_sync_engine(engine), _ATTACHED_ATTR, False))
 
 
 def detach(engine: Any) -> None:

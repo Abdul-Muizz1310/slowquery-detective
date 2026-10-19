@@ -1,195 +1,228 @@
-"""FastAPI integration — see ``docs/specs/05-middleware.md``.
+"""``install()`` — validation and wiring. See ``docs/specs/07-fleet-observability.md``.
 
-``install(app, engine)`` wires every component in this package onto a
-FastAPI app + SQLAlchemy engine:
+``install(app, engine, service=...)`` checks every argument before it touches
+anything, then:
 
-1. Construct a :class:`RingBuffer`.
-2. ``hooks.attach(engine, buffer, sample_rate=...)``.
-3. Construct :class:`ExplainWorker`, start it on app startup, stop on
-   shutdown.
-4. Register shutdown handlers that detach the hooks and stop the worker.
+1. picks the store (``store``, else ``PostgresStoreWriter(store_url)``, else
+   the in-memory store);
+2. builds the ring buffer, recorder, EXPLAIN worker and runtime;
+3. adds the request-tagging ASGI middleware;
+4. mounts the read routes at ``mount_path`` behind ``authorize``;
+5. wraps the app's lifespan so the runtime starts after the host's startup and
+   stops before the host's shutdown (Starlette 1.x has no
+   ``add_event_handler``; upstreamed from slowquery-demo-backend's shim 1);
+6. attaches the SQLAlchemy hooks with ``runtime.observe`` as the callback.
 
-The full dashboard router + HTTP surface is exercised by
-``tests/integration/test_middleware.py`` — the unit tests here cover
-argument validation only.
+It must run before the app serves its first request or lifespan event.
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from typing import Any
+import math
+import re
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Any, Final
 
 import httpx
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-import slowquery_detective.hooks as _hooks_mod
+import slowquery_detective.hooks as hooks
 from slowquery_detective.buffer import RingBuffer
-from slowquery_detective.explain import ExplainJob, ExplainWorker
-from slowquery_detective.hooks import attach
+from slowquery_detective.explain import ExplainerCallable, ExplainWorker
 from slowquery_detective.llm_explainer import LlmConfig
 from slowquery_detective.llm_explainer import explain as llm_explain
+from slowquery_detective.pg_store import PostgresStoreWriter
+from slowquery_detective.recorder import Recorder
+from slowquery_detective.router import Authorize, build_router
 from slowquery_detective.rules import run_rules
 from slowquery_detective.rules.base import Suggestion
+from slowquery_detective.runtime import Runtime
 from slowquery_detective.store import InMemoryStoreWriter, StoreWriter
+from slowquery_detective.tagging import RequestIdMiddleware
 
 _LOG = logging.getLogger("slowquery.middleware")
 
-_INSTALLED_ATTR = "_slowquery_installed"
+_INSTALLED_ATTR: Final = "slowquery_installed"
+_SERVICE_RE: Final = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_MOUNT_RE: Final = re.compile(r"(/[A-Za-z0-9._~-]+)+")
+
+
+def _require_int(name: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int")
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return value
+
+
+def _validate(
+    app: object,
+    engine: object,
+    *,
+    service: object,
+    threshold_ms: object,
+    sample_rate: object,
+    store_url: str | None,
+    store: StoreWriter | None,
+    authorize: object,
+    mount_path: object,
+    retention_s: object,
+    enable_llm: bool,
+    llm_config: LlmConfig | None,
+) -> None:
+    if app is None:
+        raise ValueError("app must not be None")
+    if not isinstance(app, FastAPI):
+        raise TypeError("app must be a fastapi.FastAPI")
+    if engine is None:
+        raise ValueError("engine must not be None")
+    if not isinstance(engine, AsyncEngine):
+        raise TypeError("engine must be a sqlalchemy.ext.asyncio.AsyncEngine")
+    if not isinstance(service, str) or _SERVICE_RE.fullmatch(service) is None:
+        raise ValueError("service must match [a-z0-9][a-z0-9_-]{0,63}")
+    _require_int("threshold_ms", threshold_ms)
+    _require_int("retention_s", retention_s)
+    if (
+        isinstance(sample_rate, bool)
+        or not isinstance(sample_rate, int | float)
+        or not math.isfinite(sample_rate)
+        or not 0.0 <= sample_rate <= 1.0
+    ):
+        raise ValueError("sample_rate must be in [0.0, 1.0]")
+    if store_url is not None and store is not None:
+        raise ValueError("pass store_url or store, not both")
+    if store is not None and not isinstance(store, StoreWriter):
+        raise TypeError("store must be a StoreWriter")
+    if not isinstance(mount_path, str) or _MOUNT_RE.fullmatch(mount_path) is None:
+        raise ValueError("mount_path must look like /_slowquery (leading /, no trailing /)")
+    if authorize is not None and not callable(authorize):
+        raise TypeError("authorize must be an async callable taking the Request, or None")
+    if enable_llm and llm_config is None:
+        raise ValueError("enable_llm=True requires llm_config")
+
+
+def _llm(
+    enable_llm: bool, llm_config: LlmConfig | None
+) -> tuple[ExplainerCallable | None, httpx.AsyncClient | None]:
+    if not enable_llm or llm_config is None:
+        return None, None
+    cfg = llm_config
+    # One keep-alive client reused across cascades instead of a new TLS
+    # handshake to OpenRouter on every fallback.
+    client = httpx.AsyncClient()
+
+    async def _explainer(
+        canonical_sql: str, plan_json: dict[str, Any], *, fingerprint_id: str
+    ) -> Suggestion | None:
+        return await llm_explain(
+            canonical_sql, plan_json, config=cfg, fingerprint_id=fingerprint_id, client=client
+        )
+
+    return _explainer, client
+
+
+def _wrap_lifespan(app: FastAPI, runtime: Runtime) -> None:
+    host: Callable[[Any], AbstractAsyncContextManager[Any]] = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(app_: Any) -> AsyncIterator[Any]:
+        async with host(app_) as state:
+            await runtime.start()
+            try:
+                yield state
+            finally:
+                await runtime.stop()
+
+    app.router.lifespan_context = lifespan
 
 
 def install(
-    app: Any,
-    engine: Any,
+    app: FastAPI,
+    engine: AsyncEngine,
     *,
+    service: str,
     threshold_ms: int = 100,
     sample_rate: float = 1.0,
     store_url: str | None = None,
     store: StoreWriter | None = None,
+    authorize: Authorize | None = None,
+    mount_path: str = "/_slowquery",
+    retention_s: int = 604_800,
     enable_llm: bool = False,
     llm_config: LlmConfig | None = None,
 ) -> None:
-    """Attach slowquery-detective to a FastAPI app + SQLAlchemy engine.
+    """Attach slowquery-detective to a FastAPI app and its async engine.
 
-    3-line integration::
+    Fleet integration::
 
         from slowquery_detective import install
-        install(app, engine)
+        install(app, engine, service="paper-trail",
+                store_url=settings.database_url, authorize=verify_platform_token)
     """
-    if app is None:
-        raise ValueError("app must not be None")
-    if engine is None:
-        raise ValueError("engine must not be None")
-    if threshold_ms <= 0:
-        raise ValueError("threshold_ms must be > 0")
-    if not 0.0 <= sample_rate <= 1.0:
-        raise ValueError("sample_rate must be in [0.0, 1.0]")
-    if enable_llm and llm_config is None:
-        raise ValueError("enable_llm=True requires llm_config")
-
-    # Idempotent install.
+    _validate(
+        app,
+        engine,
+        service=service,
+        threshold_ms=threshold_ms,
+        sample_rate=sample_rate,
+        store_url=store_url,
+        store=store,
+        authorize=authorize,
+        mount_path=mount_path,
+        retention_s=retention_s,
+        enable_llm=enable_llm,
+        llm_config=llm_config,
+    )
     if getattr(app.state, _INSTALLED_ATTR, False):
         _LOG.warning("slowquery.middleware.already_installed")
         return
+    if app.middleware_stack is not None:
+        raise RuntimeError("install() must run before the app serves its first request")
+
+    chosen: StoreWriter
+    if store is not None:
+        chosen = store
+    elif store_url is not None:
+        chosen = PostgresStoreWriter(store_url)
+    else:
+        chosen = InMemoryStoreWriter()
 
     buffer = RingBuffer()
-    # Default to the process-local in-memory store so the worker actually
-    # persists (rather than raising NotImplementedError on every job). Callers
-    # that need cross-process aggregation inject their own StoreWriter.
-    if store is None:
-        store = InMemoryStoreWriter(store_url or _engine_url(engine))
+    explainer, llm_client = _llm(enable_llm, llm_config)
+    worker = ExplainWorker(engine=engine, store=chosen, rules=run_rules, explainer=explainer)
 
-    def _rules_adapter(
-        plan: dict[str, Any],
-        canonical_sql: str,
-        *,
-        fingerprint_id: str = "",
-        recent_call_count: int = 0,
-    ) -> list[Suggestion]:
-        return run_rules(
-            plan, canonical_sql, fingerprint_id=fingerprint_id, recent_call_count=recent_call_count
-        )
+    def _on_start() -> None:
+        # A lifespan that ran before detached the hooks; observe again.
+        if not hooks.is_attached(engine):
+            hooks.attach(engine, buffer, sample_rate=float(sample_rate), on_record=runtime.observe)
 
-    explainer = None
-    llm_client: httpx.AsyncClient | None = None
-    if enable_llm and llm_config is not None:
-        cfg = llm_config  # capture for closure
-        # One keep-alive client reused across cascades (audit OPT-3) instead
-        # of a fresh TCP+TLS handshake to OpenRouter on every LLM fallback.
-        llm_client = httpx.AsyncClient()
-        client = llm_client  # capture for closure
-
-        async def _explainer(
-            canonical_sql: str,
-            plan_json: dict[str, Any],
-            *,
-            fingerprint_id: str,
-        ) -> Suggestion | None:
-            return await llm_explain(
-                canonical_sql,
-                plan_json,
-                config=cfg,
-                fingerprint_id=fingerprint_id,
-                client=client,
-            )
-
-        explainer = _explainer
-
-    worker = ExplainWorker(
-        engine=engine,
-        store=store,
-        rules=_rules_adapter,
-        explainer=explainer,
-    )
-
-    # Cache of fingerprint_id -> canonical_sql for on-demand suggestion
-    # generation in the dashboard router.
-    canonical_sql_cache: dict[str, str] = {}
-
-    def _on_record(fp_id: str, canonical_sql: str, duration_ms: float) -> None:
-        """Submit an explain job only for queries that crossed the threshold.
-
-        Per ``docs/specs/05-middleware.md`` item 8 the middleware owns the
-        slow-query decision: EXPLAIN is spent only when
-        ``duration_ms >= threshold_ms``. Fast queries are still fingerprinted
-        and tracked in the ring buffer (so their percentiles show up in the
-        dashboard) but never trigger a background EXPLAIN. The worker's
-        per-fingerprint cooldown then bounds re-runs of slow fingerprints.
-        """
-        # Always remember the canonical SQL so the dashboard can attribute a
-        # fingerprint even before an EXPLAIN has run.
-        canonical_sql_cache[fp_id] = canonical_sql
-        if duration_ms < threshold_ms:
-            return
-        job = ExplainJob(
-            fingerprint_id=fp_id,
-            canonical_sql=canonical_sql,
-            observed_ms=duration_ms,
-            enqueued_at=time.monotonic(),
-        )
-        worker.submit(job)
-
-    attach(engine, buffer, sample_rate=sample_rate, on_record=_on_record)
-
-    app.state.slowquery_buffer = buffer
-    app.state.slowquery_store = store
-    app.state.slowquery_worker = worker
-    app.state.slowquery_engine = engine
-    app.state.slowquery_threshold_ms = threshold_ms
-    app.state.slowquery_canonical_sql_cache = canonical_sql_cache
-    setattr(app.state, _INSTALLED_ATTR, True)
-
-    # Start the worker eagerly so it processes explain jobs immediately.
-    # Also register startup/shutdown handlers for apps that use lifespan.
-    import asyncio
-
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(worker.start())
-    except RuntimeError:
-        pass  # no running loop; worker will be started on startup
-
-    async def _on_startup() -> None:
-        await worker.start()
-
-    async def _on_shutdown() -> None:
-        _hooks_mod.detach(engine)
-        await worker.stop()
+    async def _on_stop() -> None:
+        hooks.detach(engine)
         buffer.clear()
         if llm_client is not None:
-            try:
-                await llm_client.aclose()
-            except Exception:
-                _LOG.debug("slowquery.middleware.llm_client_close_error", exc_info=True)
-        try:
-            await store.close()
-        except Exception:
-            _LOG.debug("slowquery.middleware.store_close_error", exc_info=True)
+            await llm_client.aclose()
 
-    app.router.add_event_handler("startup", _on_startup)
-    app.router.add_event_handler("shutdown", _on_shutdown)
+    runtime = Runtime(
+        service=service,
+        store=chosen,
+        recorder=Recorder(threshold_ms=threshold_ms),
+        buffer=buffer,
+        worker=worker,
+        retention_s=retention_s,
+        on_start=_on_start,
+        on_stop=_on_stop,
+    )
 
+    app.add_middleware(RequestIdMiddleware)
+    app.include_router(build_router(runtime, authorize), prefix=mount_path)
+    _wrap_lifespan(app, runtime)
+    hooks.attach(engine, buffer, sample_rate=float(sample_rate), on_record=runtime.observe)
 
-def _engine_url(engine: Any) -> str:
-    """Return the engine's connection URL as a string (best effort)."""
-    url = getattr(engine, "url", None)
-    return str(url) if url is not None else ""
+    app.state.slowquery_runtime = runtime
+    app.state.slowquery_store = chosen
+    app.state.slowquery_worker = worker
+    app.state.slowquery_buffer = buffer
+    setattr(app.state, _INSTALLED_ATTR, True)

@@ -1,7 +1,9 @@
 """Micro-benchmarks for the slowquery-detective hot path (no database).
 
-Only two things run synchronously on every query — ``fingerprint()`` and
-``RingBuffer.record()`` — and both are measured here. The rules engine and
+Three things run synchronously on every recorded query — ``fingerprint()``,
+``RingBuffer.record()`` and (since 0.2.0) ``Recorder.observe()`` — and all three
+are measured here, the recorder both for an untagged statement and for one run
+under an ``X-Request-Id`` (which also updates a per-request aggregate). The rules engine and
 ``RingBuffer.percentiles`` are measured too, but they are *not* per-query costs:
 ``run_rules`` runs on the background ``ExplainWorker`` and ``percentiles`` only
 when the dashboard is rendered. ``EXPLAIN`` itself needs a database and is out of
@@ -43,11 +45,20 @@ import statistics
 import sys
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import NamedTuple
 
+from sqlalchemy import create_engine
+
 from slowquery_detective.buffer import RingBuffer
+from slowquery_detective.explain import ExplainWorker
 from slowquery_detective.fingerprint import _fingerprint_cached, fingerprint
+from slowquery_detective.hooks import attach
+from slowquery_detective.recorder import Recorder
 from slowquery_detective.rules.base import run_rules
+from slowquery_detective.runtime import Runtime
+from slowquery_detective.store import InMemoryStoreWriter
+from slowquery_detective.tagging import _REQUEST_ID
 
 # The uncached core of ``fingerprint()``. Reaching for the LRU wrapper's
 # ``__wrapped__`` is deliberate: it is the only way to time the real parse
@@ -127,6 +138,54 @@ class BenchResult(NamedTuple):
     ops_per_sec: float
 
 
+# One recorder shared by the two recorder cases. The threshold is out of reach,
+# so no hot-path case ever takes the slow-sample branch; repeated observations
+# of one fingerprint keep its state O(1) however long the case runs.
+HOT_RECORDER = Recorder(threshold_ms=1e9)
+_HOT_FP = "0123456789abcdef"
+_HOT_SQL = "select * from orders where user_id = ?"
+
+
+def _listener_runtime() -> tuple[Runtime, Callable[[], None]]:
+    """The real ``before``/``after`` listeners, attached to an engine that is
+    never connected, wired to a real :class:`Runtime` exactly as ``install``
+    wires them. Calling the pair times everything the library adds to one
+    statement: timing, fingerprint (LRU hit), buffer record, the
+    :class:`Observation` and ``Runtime.observe`` -> ``Recorder.observe``."""
+    engine = create_engine("sqlite://")
+    store = InMemoryStoreWriter()
+    buffer = RingBuffer()
+    runtime = Runtime(
+        service="bench",
+        store=store,
+        recorder=Recorder(threshold_ms=1e9),
+        buffer=buffer,
+        worker=ExplainWorker(engine=engine, store=store, rules=run_rules, explainer=None),
+        retention_s=3_600,
+    )
+    attach(engine, buffer, on_record=runtime.observe)
+    before, after, _on_error = engine._slowquery_listeners  # type: ignore[attr-defined]
+    statement = QUERIES["simple_select"]
+    context = SimpleNamespace()
+
+    def pair() -> None:
+        before(None, None, statement, (1,), context, False)
+        after(None, None, statement, (1,), context, False)
+
+    return runtime, pair
+
+
+LISTENER_RUNTIME, _LISTENER_PAIR = _listener_runtime()
+
+
+def _tagged_pair() -> None:
+    token = _REQUEST_ID.set("req-1")  # set/reset included: an upper bound
+    try:
+        _LISTENER_PAIR()
+    finally:
+        _REQUEST_ID.reset(token)
+
+
 def build_cases() -> list[BenchCase]:
     """Enumerate every case the report publishes, in table order."""
     cases: list[BenchCase] = []
@@ -172,6 +231,36 @@ def build_cases() -> list[BenchCase]:
         BenchCase(
             name="ringbuffer:record",
             fn=lambda: record_buffer.record("hot", 12.5),
+            iterations=200_000,
+        )
+    )
+
+    cases.append(
+        BenchCase(
+            name="recorder:observe (untagged)",
+            fn=lambda: HOT_RECORDER.observe(_HOT_FP, _HOT_SQL, 12.5, None),
+            iterations=200_000,
+        )
+    )
+    cases.append(
+        BenchCase(
+            name="recorder:observe (tagged)",
+            fn=lambda: HOT_RECORDER.observe(_HOT_FP, _HOT_SQL, 12.5, "req-1"),
+            iterations=200_000,
+        )
+    )
+
+    cases.append(
+        BenchCase(
+            name="hook listeners (untagged)",
+            fn=_LISTENER_PAIR,
+            iterations=200_000,
+        )
+    )
+    cases.append(
+        BenchCase(
+            name="hook listeners (tagged)",
+            fn=_tagged_pair,
             iterations=200_000,
         )
     )

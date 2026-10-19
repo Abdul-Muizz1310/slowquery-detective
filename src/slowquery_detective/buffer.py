@@ -106,6 +106,15 @@ class RingBuffer:
 
             return _compute_percentiles([d for _t, d in live])
 
+    def count(self, fingerprint_id: str, now: float | None = None) -> int:
+        """Samples recorded for ``fingerprint_id`` inside the window (no sort)."""
+        cutoff = self._clock(now) - self._window_seconds
+        with self._lock:
+            samples = self._samples.get(fingerprint_id)
+            if samples is None:
+                return 0
+            return sum(1 for t, _d in samples if t >= cutoff)
+
     def keys(self) -> frozenset[str]:
         with self._lock:
             return frozenset(self._samples.keys())
