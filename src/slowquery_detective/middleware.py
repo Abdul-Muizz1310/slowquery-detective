@@ -104,24 +104,52 @@ def _validate(
         raise ValueError("enable_llm=True requires llm_config")
 
 
+class _LlmClient:
+    """The keep-alive HTTP client for OpenRouter, one per lifespan.
+
+    One client is reused across cascades instead of a new TLS handshake per
+    fallback. It is closed at shutdown and opened again at the next startup,
+    so an app whose lifespan runs more than once keeps its LLM fallback.
+    """
+
+    def __init__(self) -> None:
+        self._client: httpx.AsyncClient | None = None
+
+    def open(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        return self.open()
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+
 def _llm(
     enable_llm: bool, llm_config: LlmConfig | None
-) -> tuple[ExplainerCallable | None, httpx.AsyncClient | None]:
+) -> tuple[ExplainerCallable | None, _LlmClient | None]:
     if not enable_llm or llm_config is None:
         return None, None
     cfg = llm_config
-    # One keep-alive client reused across cascades instead of a new TLS
-    # handshake to OpenRouter on every fallback.
-    client = httpx.AsyncClient()
+    holder = _LlmClient()
 
     async def _explainer(
         canonical_sql: str, plan_json: dict[str, Any], *, fingerprint_id: str
     ) -> Suggestion | None:
         return await llm_explain(
-            canonical_sql, plan_json, config=cfg, fingerprint_id=fingerprint_id, client=client
+            canonical_sql,
+            plan_json,
+            config=cfg,
+            fingerprint_id=fingerprint_id,
+            client=holder.client,
         )
 
-    return _explainer, client
+    return _explainer, holder
 
 
 def _wrap_lifespan(app: FastAPI, runtime: Runtime) -> None:
@@ -195,9 +223,11 @@ def install(
     worker = ExplainWorker(engine=engine, store=chosen, rules=run_rules, explainer=explainer)
 
     def _on_start() -> None:
-        # A lifespan that ran before detached the hooks; observe again.
+        # A lifespan that ran before detached the hooks and closed the client.
         if not hooks.is_attached(engine):
             hooks.attach(engine, buffer, sample_rate=float(sample_rate), on_record=runtime.observe)
+        if llm_client is not None:
+            llm_client.open()
 
     async def _on_stop() -> None:
         hooks.detach(engine)
@@ -216,7 +246,7 @@ def install(
         on_stop=_on_stop,
     )
 
-    app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(RequestIdMiddleware, exclude_prefix=mount_path)
     app.include_router(build_router(runtime, authorize), prefix=mount_path)
     _wrap_lifespan(app, runtime)
     hooks.attach(engine, buffer, sample_rate=float(sample_rate), on_record=runtime.observe)

@@ -66,17 +66,37 @@ def _header_request_id(scope: Scope) -> str | None:
     return parse_request_id(decoded)
 
 
-class RequestIdMiddleware:
-    """Pure ASGI middleware: tag each HTTP request with its ``X-Request-Id``."""
+def _route_path(scope: Scope) -> str:
+    path: str = scope.get("path", "")
+    root: str = scope.get("root_path", "")
+    return path[len(root) :] if root and path.startswith(root) else path
 
-    def __init__(self, app: ASGIApp) -> None:
+
+class RequestIdMiddleware:
+    """Pure ASGI middleware: tag each HTTP request with its ``X-Request-Id``.
+
+    Requests under ``exclude_prefix`` (the library's own routes) are never
+    tagged: a caller measuring request R sends ``X-Request-Id: R`` on the
+    measure call too, and whatever runs during that call must not be charged
+    to R.
+    """
+
+    def __init__(self, app: ASGIApp, exclude_prefix: str | None = None) -> None:
         self.app = app
+        self._exclude = exclude_prefix
+
+    def _excluded(self, scope: Scope) -> bool:
+        if self._exclude is None:
+            return False
+        path = _route_path(scope)
+        return path == self._exclude or path.startswith(self._exclude + "/")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        token = _REQUEST_ID.set(_header_request_id(scope))
+        rid = None if self._excluded(scope) else _header_request_id(scope)
+        token = _REQUEST_ID.set(rid)
         try:
             await self.app(scope, receive, send)
         finally:

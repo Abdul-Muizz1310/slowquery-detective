@@ -180,15 +180,22 @@ class Runtime:
                 batch = replace(batch, dropped=0)
             if batch.is_empty():
                 return
-            if not await self.ensure_ready():
-                self._pending = batch
-                return
             try:
+                if not await self.ensure_ready():
+                    self._pending = batch
+                    return
                 await self.store.write_batch(self.service, batch)
             except Exception:
                 _LOG.error("slowquery.runtime.flush_failed", exc_info=True)
                 self._pending = batch
                 return
+            except BaseException:
+                # Cancelled mid-write (shutdown, a cancelled read, the final
+                # flush's timeout): keep the batch for the next flush. A write
+                # that committed just before the cancellation is counted twice,
+                # which is the safer side of the trade.
+                self._pending = batch
+                raise
             if (
                 self._last_sweep is None
                 or self._clock() - self._last_sweep >= self._sweep_interval_s

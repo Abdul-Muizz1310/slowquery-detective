@@ -143,11 +143,13 @@ class InMemoryStoreWriter(StoreWriter):
     def __init__(
         self,
         *,
+        max_fingerprints: int = 10_000,
         max_samples_per_fingerprint: int = 100,
         max_request_rows: int = 50_000,
     ) -> None:
-        if max_samples_per_fingerprint <= 0 or max_request_rows <= 0:
+        if min(max_fingerprints, max_samples_per_fingerprint, max_request_rows) <= 0:
             raise ValueError("bounds must be > 0")
+        self._max_fingerprints = max_fingerprints
         self._max_samples = max_samples_per_fingerprint
         self._max_request_rows = max_request_rows
         self._fps: dict[tuple[str, str], _Fingerprint] = {}
@@ -179,7 +181,11 @@ class InMemoryStoreWriter(StoreWriter):
             fp.traffic.add(delta)
             if delta.p50_ms is not None:
                 fp.p50_ms, fp.p95_ms, fp.p99_ms = delta.p50_ms, delta.p95_ms, delta.p99_ms
+        while len(self._fps) > self._max_fingerprints:
+            self._evict_least_recently_seen()
         for (rid, fid), rdelta in batch.requests.items():
+            if (service, fid) not in self._fps:
+                continue  # its fingerprint was just evicted
             key = (service, rid, fid)
             row = self._reqs.get(key)
             if row is None:
@@ -190,6 +196,8 @@ class InMemoryStoreWriter(StoreWriter):
                 row.add(rdelta)
                 self._reqs.move_to_end(key)
         for sample in batch.samples:
+            if (service, sample.fingerprint_id) not in self._fps:
+                continue
             bucket = self._samples.setdefault(
                 (service, sample.fingerprint_id), deque(maxlen=self._max_samples)
             )
@@ -200,6 +208,16 @@ class InMemoryStoreWriter(StoreWriter):
                     sampled_at=to_datetime(sample.sampled_at),
                 )
             )
+
+    def _evict_least_recently_seen(self) -> None:
+        (service, fid), _fp = min(self._fps.items(), key=lambda kv: kv[1].traffic.last_seen)
+        del self._fps[(service, fid)]
+        self._samples.pop((service, fid), None)
+        for key in [k for k in self._reqs if k[0] == service and k[2] == fid]:
+            del self._reqs[key]
+        if not any(f == fid for _s, f in self._fps):
+            self._plans.pop(fid, None)
+            self._suggestions.pop(fid, None)
 
     async def upsert_plan(
         self,

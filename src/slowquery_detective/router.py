@@ -18,6 +18,7 @@ from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import AwareDatetime
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from slowquery_detective.runtime import Runtime
 from slowquery_detective.schemas import QueryDetail, QueryRow
@@ -40,7 +41,7 @@ def build_router(runtime: Runtime, authorize: Authorize | None) -> APIRouter:
             verdict: object = authorize(request)
             if inspect.isawaitable(verdict):
                 verdict = await verdict
-        except HTTPException:
+        except StarletteHTTPException:  # FastAPI's HTTPException is a subclass
             raise
         except Exception as exc:
             # Class only: a verifier's message may quote the credential.

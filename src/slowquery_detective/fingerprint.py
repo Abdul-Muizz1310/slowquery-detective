@@ -22,11 +22,22 @@ from sqlglot import exp
 # single quote), numeric literals, and bare keyword literals.
 _FALLBACK_LITERAL_RE = re.compile(
     r"""
-    '(?:[^']|'')*'              # single-quoted string literal
+    \$(?P<tag>[A-Za-z_]\w*)?\$.*?\$(?P=tag)?\$   # dollar-quoted string ($$..$$, $q$..$q$)
+    | [EeXxBbNn]?'(?:[^']|'')*'  # string literal, with an E/X/B/N prefix or none
     | -?\d+(?:\.\d+)?           # numeric literal
     | \btrue\b | \bfalse\b | \bnull\b
     """,
-    re.IGNORECASE | re.VERBOSE,
+    re.IGNORECASE | re.VERBOSE | re.DOTALL,
+)
+
+# sqlglot node types for string literals that are not ``exp.Literal``.
+_STRING_NODES: tuple[type[exp.Expression], ...] = (
+    exp.RawString,
+    exp.ByteString,
+    exp.HexString,
+    exp.BitString,
+    exp.UnicodeString,
+    exp.National,
 )
 
 # Match driver / dialect parameter placeholders.
@@ -110,6 +121,14 @@ def _canonicalize_via_sqlglot(sql: str, dialect: str) -> str | None:
         # 2. Literals (numeric, string) -> Placeholder
         for literal in list(tree.find_all(exp.Literal)):
             literal.replace(exp.Placeholder())
+
+        # 2b. String forms sqlglot keeps as their own node types: dollar-quoted
+        #     ($$..$$), escape (E'..'), hex (X'..'), bit (B'..'), unicode
+        #     (U&'..') and national (N'..') strings. Canonical SQL is stored and
+        #     served, so none of them may survive.
+        for node_type in _STRING_NODES:
+            for node in list(tree.find_all(node_type)):
+                node.replace(exp.Placeholder())
 
         # 3. Boolean / NULL -> Placeholder
         for boolean in list(tree.find_all(exp.Boolean)):

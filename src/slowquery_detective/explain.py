@@ -39,6 +39,10 @@ _LOG = logging.getLogger("slowquery.worker")
 
 EXPLAIN_PREFIX: Final = "EXPLAIN (FORMAT JSON) "
 
+# When the cooldown map grows past this many fingerprints, expired entries are
+# dropped, so it is bounded by the number of fingerprints explained recently.
+COOLDOWN_PRUNE_AT = 10_000
+
 # Statement kinds that mutate data if they reach the server. EXPLAIN in
 # ANALYZE mode *executes* its target; the worker no longer uses that mode, and
 # still never sends any of these — including data-modifying CTEs like
@@ -238,6 +242,11 @@ class ExplainWorker:
         return self._queue.qsize()
 
     @property
+    def cooling_down(self) -> int:
+        """Fingerprints currently held in the cooldown map."""
+        return len(self._cooldown_until)
+
+    @property
     def processed_jobs(self) -> int:
         """Total jobs taken off the queue and handled (explained or refused)."""
         return self._processed_jobs
@@ -298,7 +307,10 @@ class ExplainWorker:
         self._processed_jobs += 1
 
     def _cool_down(self, fingerprint_id: str) -> None:
-        self._cooldown_until[fingerprint_id] = self._now() + self._cooldown
+        now = self._now()
+        if len(self._cooldown_until) >= COOLDOWN_PRUNE_AT:
+            self._cooldown_until = {k: v for k, v in self._cooldown_until.items() if v > now}
+        self._cooldown_until[fingerprint_id] = now + self._cooldown
 
     async def _process_one(self, job: ExplainJob) -> None:
         until = self._cooldown_until.get(job.fingerprint_id)
