@@ -6,6 +6,88 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
+Fleet observability: install the library in every backend, keep what it sees in the service's own
+Postgres, and ask any service which queries one request caused. Spec:
+[`docs/specs/07-fleet-observability.md`](docs/specs/07-fleet-observability.md). Upstreams the four
+shims slowquery-demo-backend carried (its `docs/DEVIATIONS.md` §8).
+
+### Breaking
+
+- `install()` requires a keyword-only `service` (`[a-z0-9][a-z0-9_-]{0,63}`), and `engine` must be
+  an `AsyncEngine`. Every argument is validated before anything is wired.
+- The static shared secret is gone: `SLOWQUERY_PLATFORM_TOKEN` and the `X-Platform-Token` check are
+  no longer read. Access to the routes is whatever the new `authorize(request) -> bool` hook decides;
+  with no hook, every route answers 403.
+- `dashboard_router` is removed, and with it `GET /api/queries`, `GET /api/queries/{id}`,
+  `POST /api/queries/{id}/apply` and `GET /api/stream`. `install()` now mounts two read routes itself,
+  `GET {mount_path}/queries` and `GET {mount_path}/queries/{id}` (`mount_path` defaults to
+  `/_slowquery`). Applying DDL over HTTP is no longer part of the library, so `DEMO_MODE` is not read
+  either.
+- `store_url` means "persist to this Postgres" (schema `slowquery`); it no longer defaults to the
+  engine's URL. Without `store_url` or `store`, the in-memory store is used.
+- `StoreWriter` is an abstract base with a new interface (`start`, `write_batch`, `upsert_plan`,
+  `insert_suggestions`, `sweep`, `list_queries`, `list_request_queries`, `get_query`, `close`);
+  0.1 subclasses must be rewritten.
+- `ExplainJob` carries the statement, its parameters and the recent call count;
+  `ExplainWorker.plan_cache_get`, `CachedPlan` and `synthesize_params` are removed. The `rules`
+  callable is called with `fingerprint_id` and `recent_call_count` keywords.
+- `hooks.attach(on_record=...)` passes one `Observation` instead of three positional values.
+- `LlmConfig` model slots default to the free OpenRouter models (`google/gemma-4-26b-a4b-it:free`,
+  `minimax/minimax-m3.1-flash:free`, `google/gemma-4-31b-it:free`) instead of empty strings.
+
+### Added
+
+- Request tagging: an ASGI middleware copies a valid `X-Request-Id` into a context variable. Every
+  statement a tagged request runs — in the endpoint, a dependency, a `BackgroundTasks` function or an
+  `asyncio` task it spawned — adds to a per-`(request_id, fingerprint)` aggregate (`calls`,
+  `total_ms`, `max_ms`) regardless of `threshold_ms` and of `sample_rate`.
+- `GET {mount_path}/queries?request_id=&since=&limit=` returns `QueryRow`s
+  (`id, fingerprint, first_seen, last_seen, call_count, total_ms, p50_ms, p95_ms, p99_ms, max_ms,
+  suggestions[kind, source, sql, rationale, applied_at]`); with `request_id`, only that request's
+  fingerprints and numbers, percentiles `null`. `GET {mount_path}/queries/{id}` returns
+  `{fingerprint, canonical_sql, explain_plan, suggestions, recent_samples}`.
+- `PostgresStoreWriter`: its own small engine (never instrumented), tables `query_fingerprints`,
+  `request_stats`, `query_samples`, `explain_plans`, `suggestions` (unique
+  `(fingerprint_id, kind, sql)`) and `schema_version` in schema `slowquery`, created at startup by
+  `CREATE … IF NOT EXISTS` under an advisory lock (safe on every boot and on concurrent boots),
+  batched additive upserts, Neon-style URLs normalised for asyncpg.
+- Retention: `retention_s` (default 7 days) for samples and request aggregates; the sweep runs at
+  startup and then at most hourly, and only after a flush that wrote something.
+- A `postgres` extra (`asyncpg`).
+- `ExplainWorker.processed_jobs` and `queued`, beside `dropped_jobs`.
+- `current_request_id()`, `QueryRow`, `QueryDetail`, `SuggestionOut`, `StoreWriter`,
+  `InMemoryStoreWriter`, `PostgresStoreWriter` and `LlmConfig` are exported.
+
+### Changed
+
+- `EXPLAIN` runs with the statement's real parameters and **without `ANALYZE`**, so the statement is
+  never executed again. Typed parameters such as `$1::UUID`, which the 0.1 synthesizer turned into
+  invalid SQL, now produce plans.
+- Plans are scrubbed of literal values before they are stored or sent to the LLM; driver errors are
+  logged by class only, since their messages can quote a parameter.
+- Statement start times live on the SQLAlchemy `ExecutionContext`; the global per-cursor map is
+  gone.
+- `install()` wraps the app's lifespan instead of calling `add_event_handler` (removed in
+  Starlette 1.x). A later lifespan on the same app — also on a new event loop, as when a test suite
+  re-enters `TestClient(app)` — re-attaches the hooks and gives the worker a fresh queue.
+- A slow fingerprint that is already queued or cooling down is not queued again; submissions from
+  another thread go through `call_soon_threadsafe`.
+- The library's background tasks run in an empty context, so nothing they execute is attributed to a
+  request.
+- Requests to the library's own routes are not tagged, so a measure call carrying `X-Request-Id: R`
+  never adds to R's numbers.
+- The fingerprinter also replaces dollar-quoted (`$$..$$`, `$tag$..$tag$`), escape (`E'..'`), hex,
+  bit, unicode and national string literals, on both of its paths, since canonical SQL is now
+  stored and served. Fingerprint ids of statements with such literals change.
+- A flush cancelled mid-write (shutdown, a cancelled read) keeps its batch for the next flush.
+- The in-memory store is bounded in fingerprints too (10,000, least recently seen evicted), and the
+  worker's cooldown map drops expired entries.
+- An `authorize` hook may raise Starlette's `HTTPException` as well as FastAPI's.
+- CI measures branch coverage, runs the unit and Postgres tiers together, and fails any module under
+  85 %.
+
 ## [0.1.1] - 2026-10-20
 
 The fixes made on `main` since 0.1.0, released. 0.1.0 shipped the dashboard router and the store as
@@ -59,6 +141,7 @@ stubs that raised `NotImplementedError`; 0.1.1 is the first release in which bot
 - First release: SQL fingerprinting, a sliding-window ring buffer, SQLAlchemy hooks, a background
   `EXPLAIN` worker, a six-rule engine, an OpenRouter fallback and `install()`.
 
-[Unreleased]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Abdul-Muizz1310/slowquery-detective/releases/tag/v0.1.0
