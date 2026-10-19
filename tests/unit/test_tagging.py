@@ -8,6 +8,7 @@ import contextvars
 import httpx
 import pytest
 from fastapi import BackgroundTasks, Depends, FastAPI
+
 from slowquery_detective.tagging import (
     RequestIdMiddleware,
     current_request_id,
@@ -170,4 +171,63 @@ async def test_10_fresh_context_task_does_not_inherit_request_id() -> None:
     ctx = contextvars.copy_context()
     ctx.run(_REQUEST_ID.set, UUID)
     await asyncio.get_running_loop().create_task(_inside_request(), context=ctx)
+    assert seen == [None]
+
+
+# ---------------------------------------------------------------------------
+# The library's own routes are never tagged (spec 07 case 9b)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "tagged"),
+    [
+        ("/_slowquery", False),
+        ("/_slowquery/queries", False),
+        ("/_slowquery/queries/0123456789abcdef", False),
+        ("/_slowqueryx", True),
+        ("/other/_slowquery", True),
+        ("/", True),
+    ],
+)
+async def test_09b_excluded_prefix_is_never_tagged(path: str, tagged: bool) -> None:
+    seen: list[str | None] = []
+
+    async def inner(scope: dict[str, object], receive: object, send: object) -> None:
+        seen.append(current_request_id())
+
+    mw = RequestIdMiddleware(inner, exclude_prefix="/_slowquery")  # type: ignore[arg-type]
+
+    async def _receive() -> dict[str, object]:
+        return {"type": "http.request"}
+
+    async def _send(_message: dict[str, object]) -> None:
+        return None
+
+    scope = {"type": "http", "path": path, "root_path": "", "headers": [(b"x-request-id", b"R")]}
+    await mw(scope, _receive, _send)
+    assert seen == (["R"] if tagged else [None])
+
+
+async def test_09b_excluded_prefix_honours_root_path() -> None:
+    seen: list[str | None] = []
+
+    async def inner(scope: dict[str, object], receive: object, send: object) -> None:
+        seen.append(current_request_id())
+
+    mw = RequestIdMiddleware(inner, exclude_prefix="/_slowquery")  # type: ignore[arg-type]
+    scope = {
+        "type": "http",
+        "path": "/api/_slowquery/queries",
+        "root_path": "/api",
+        "headers": [(b"x-request-id", b"R")],
+    }
+
+    async def _receive() -> dict[str, object]:
+        return {"type": "http.request"}
+
+    async def _send(_message: dict[str, object]) -> None:
+        return None
+
+    await mw(scope, _receive, _send)
     assert seen == [None]

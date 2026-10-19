@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Iterator
 from datetime import datetime
@@ -296,3 +297,55 @@ async def test_27_stop_survives_failing_final_flush_and_on_stop(
         await rt.stop()
     messages = {r.getMessage() for r in caplog.records}
     assert {"slowquery.runtime.final_flush_failed", "slowquery.runtime.on_stop_failed"} <= messages
+
+
+async def test_44_a_cancelled_flush_keeps_its_batch(engine: AsyncEngine) -> None:
+    class SlowStore(InMemoryStoreWriter):
+        slow = True
+
+        async def write_batch(self, service: str, batch: Batch) -> None:
+            if self.slow:
+                await asyncio.sleep(10)
+            await super().write_batch(service, batch)
+
+    store = SlowStore()
+    rt = _direct_runtime(engine, store)
+    assert await rt.ensure_ready()
+    rt.observe(_obs(1.0, rid="R"))
+    task = asyncio.create_task(rt.flush())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    store.slow = False
+    await rt.flush()
+    rows = await store.list_request_queries("magpie", "R", since=None, limit=5)
+    assert [r.call_count for r in rows] == [1]
+
+
+async def test_44_stop_during_a_slow_write_keeps_the_data_for_the_final_flush(
+    engine: AsyncEngine,
+) -> None:
+    class SlowOnce(InMemoryStoreWriter):
+        calls = 0
+
+        async def write_batch(self, service: str, batch: Batch) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(10)
+            await super().write_batch(service, batch)
+
+        async def close(self) -> None:  # keep the data readable after stop
+            return None
+
+    store = SlowOnce()
+    rt = _direct_runtime(engine, store, flush_interval_s=0.01)
+    await rt.start()
+    rt.observe(_obs(1.0, rid="R"))
+    for _ in range(100):
+        if store.calls:
+            break
+        await asyncio.sleep(0.01)
+    await rt.stop()  # cancels the loop mid-write; the final flush must still write R
+    rows = await store.list_request_queries("magpie", "R", since=None, limit=5)
+    assert [r.call_count for r in rows] == [1]

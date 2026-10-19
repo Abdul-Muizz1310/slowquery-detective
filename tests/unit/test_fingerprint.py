@@ -253,3 +253,36 @@ def test_30_cache_bounded_and_still_correct_after_eviction() -> None:
     # Re-computable identically even after eviction pressure.
     assert fingerprint("SELECT * FROM t0 WHERE id = ?")[1] == "select * from t0 where id = ?"
     assert _fingerprint_cached.cache_info().maxsize == 2048
+
+
+# ---------------------------------------------------------------------------
+# 0.2.0 (spec 07): canonical SQL is persisted and served, so no literal form
+# may survive — dollar-quoted, escape, hex, bit, unicode and national strings.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        "$$sekret$$",
+        "$tag$sekret$tag$",
+        "E'sekret'",
+        "X'5ec2e7'",
+        "B'0101101'",
+        "U&'sekret'",
+        "N'sekret'",
+    ],
+)
+def test_special_string_literals_are_scrubbed(literal: str) -> None:
+    fid, canonical = fingerprint(f"SELECT * FROM t WHERE a = {literal}")
+    for needle in ("sekret", "5ec2e7", "0101101"):
+        assert needle not in canonical
+    assert fid == fingerprint("SELECT * FROM t WHERE a = 'other'")[0]
+
+
+def test_dollar_quoted_literal_is_scrubbed_on_the_regex_fallback() -> None:
+    from slowquery_detective.fingerprint import _canonicalize_via_regex
+
+    out = _canonicalize_via_regex("NOT VALID SQL ;;; $q$sekret$q$ and $$more$$")
+    assert "sekret" not in out
+    assert "more" not in out

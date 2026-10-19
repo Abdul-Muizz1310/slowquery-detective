@@ -67,3 +67,18 @@ async def test_memory_store_sweep_uses_strict_cutoff() -> None:
     detail = await store.get_query(SERVICE, FP_A)
     assert detail is not None
     assert len(detail.recent_samples) == 1
+
+
+async def test_memory_store_bounds_fingerprints_by_least_recently_seen() -> None:
+    from tests.store_contract import FP_B, FP_C
+
+    store = InMemoryStoreWriter(max_fingerprints=2)
+    await store.start()
+    await store.write_batch(SERVICE, batch([(FP_A, 500.0, "R")], start=T0, threshold_ms=100.0))
+    await store.write_batch(SERVICE, batch([(FP_B, 1.0, None)], start=T0 + 1))
+    await store.write_batch(SERVICE, batch([(FP_C, 1.0, None)], start=T0 + 2))
+    ids = {r.id for r in await store.list_queries(SERVICE, since=None, limit=50)}
+    assert ids == {FP_B, FP_C}
+    # Everything hanging off the evicted fingerprint went with it.
+    assert await store.get_query(SERVICE, FP_A) is None
+    assert await store.list_request_queries(SERVICE, "R", since=None, limit=50) == []

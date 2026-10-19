@@ -47,6 +47,14 @@ async def _allow(_request: Request) -> bool:
     return True
 
 
+@pytest.fixture(autouse=True)
+def _fresh_llm_cooldown() -> None:
+    """The LLM cooldown is process-wide by design; isolate tests from it."""
+    import slowquery_detective.llm_explainer as llm_module
+
+    llm_module._COOLDOWN.clear()
+
+
 @pytest.fixture()
 async def engine(pg: PostgresContainer) -> AsyncIterator[AsyncEngine]:
     eng = create_async_engine(asyncpg_url(pg))
@@ -109,6 +117,14 @@ def build_app(engine: AsyncEngine, pg: PostgresContainer, **kw: Any) -> FastAPI:
     @app.get("/slow")
     async def slow() -> dict[str, str]:
         await q("SELECT o.id, pg_sleep(0.03) FROM fleet_orders o WHERE o.note = :s", {"s": SECRET})
+        return {"ok": "1"}
+
+    @app.get("/slow2")
+    async def slow2() -> dict[str, str]:
+        await q(
+            "SELECT o.id, pg_sleep(0.03) FROM fleet_orders o WHERE o.note = :s AND o.id > :i",
+            {"s": SECRET, "i": 0},
+        )
         return {"ok": "1"}
 
     @app.get("/uuid")
@@ -393,3 +409,39 @@ async def test_llm_fallback_gets_a_scrubbed_plan_and_its_suggestion_is_served(
     (s,) = detail["suggestions"]
     assert s["source"] == "llm"
     assert s["sql"] == answer["suggestion"]
+
+
+async def test_llm_fallback_still_works_in_a_second_lifespan(
+    engine: AsyncEngine, pg: PostgresContainer
+) -> None:
+    """The LLM client closed at shutdown is opened again at the next startup."""
+    import respx
+    from pydantic import SecretStr
+
+    from slowquery_detective import LlmConfig
+
+    answer = {
+        "diagnosis": "a sequential scan filters fleet_orders on note",
+        "suggestion": "CREATE INDEX IF NOT EXISTS ix_fleet_orders_note ON fleet_orders(note)",
+        "confidence": 0.8,
+        "kind": "index",
+    }
+    cfg = LlmConfig(enabled=True, api_key=SecretStr("sk-or-test-key"))
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post("https://openrouter.ai/api/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": json.dumps(answer)}}]}
+            )
+        )
+        app = build_app(engine, pg, threshold_ms=10, enable_llm=True, llm_config=cfg)
+        for path, rid in (("/slow", "R-llm-1"), ("/slow2", "R-llm-2")):
+            async with running(app) as c:
+                await c.get(path, headers={"X-Request-Id": rid})
+                (row,) = [r for r in await by_request(c, rid) if "pg_sleep" in r["fingerprint"]]
+
+                async def _has_suggestion(fid: str = row["id"]) -> bool:
+                    body = (await c.get(f"/_slowquery/queries/{fid}")).json()
+                    return bool(body["suggestions"])
+
+                await eventually(_has_suggestion)
+    assert route.call_count == 2

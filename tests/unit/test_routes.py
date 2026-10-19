@@ -434,3 +434,40 @@ def test_27_lifespans_on_different_event_loops_both_work(engine: AsyncEngine) ->
                 time.sleep(0.02)
             assert runtime.worker.processed_jobs == i + 1, f"worker stalled in lifespan {i}"
             assert runtime.worker.queued == 0
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups
+# ---------------------------------------------------------------------------
+
+
+async def test_09b_measure_call_is_not_attributed_to_its_request_id(engine: AsyncEngine) -> None:
+    """bastion sends its X-Request-Id on the measure call too; whatever the
+    authorize hook (or anything else) runs during that call must not be
+    charged to the request being measured."""
+    seen: list[str | None] = []
+
+    async def _hook(_request: Request) -> bool:
+        from slowquery_detective import current_request_id
+
+        seen.append(current_request_id())
+        return True
+
+    app = _app(engine, authorize=_hook)
+    async with _client(app) as c:
+        resp = await c.get(
+            "/_slowquery/queries", params={"request_id": "R"}, headers={"X-Request-Id": "R"}
+        )
+    assert resp.status_code == 200
+    assert seen == [None]
+
+
+async def test_45_starlette_http_exception_from_the_hook_propagates(engine: AsyncEngine) -> None:
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    async def _hook(_request: Request) -> bool:
+        raise StarletteHTTPException(status_code=401, detail="expired")
+
+    app = _app(engine, authorize=_hook)
+    async with _client(app) as c:
+        assert (await c.get("/_slowquery/queries")).status_code == 401

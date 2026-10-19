@@ -577,3 +577,18 @@ def test_32_no_fstring_sql_besides_the_explain_prefix() -> None:
     source = inspect.getsource(mod)
     assert "text(f" not in source
     assert "EXPLAIN (ANALYZE" not in source
+
+
+async def test_cooldown_map_is_pruned_of_expired_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    import slowquery_detective.explain as mod
+
+    monkeypatch.setattr(mod, "COOLDOWN_PRUNE_AT", 3)
+    clock = [0.0]
+    w = worker(now=lambda: clock[0], per_fingerprint_cooldown_seconds=10.0)
+    for i in range(3):
+        w.submit(job(fid=f"{i:016x}"))
+    await w.process_pending()
+    clock[0] = 100.0  # all three expired
+    w.submit(job(fid="f" * 16))
+    await w.process_pending()
+    assert w.cooling_down == 1
