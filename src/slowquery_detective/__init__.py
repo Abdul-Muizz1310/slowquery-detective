@@ -15,9 +15,9 @@ from slowquery_detective.middleware import install
 from slowquery_detective.pg_store import PostgresStoreWriter
 from slowquery_detective.schemas import QueryDetail, QueryRow, SuggestionOut
 from slowquery_detective.store import InMemoryStoreWriter, StoreWriter
-from slowquery_detective.tagging import current_request_id
+from slowquery_detective.tagging import current_request_id, request_scope
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "InMemoryStoreWriter",
@@ -30,4 +30,5 @@ __all__ = [
     "__version__",
     "current_request_id",
     "install",
+    "request_scope",
 ]

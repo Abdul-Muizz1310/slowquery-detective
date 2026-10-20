@@ -50,6 +50,55 @@ def current_request_id() -> str | None:
     return _REQUEST_ID.get()
 
 
+class request_scope:  # noqa: N801 - used like contextlib's lower-case managers
+    """Attribute the statements run inside the block to ``request_id``.
+
+    For work that runs outside the request that caused it — a background job
+    runner processing an upload later — so its queries are still charged to
+    the upload's request id::
+
+        with request_scope(upload.request_id):
+            await process(upload)
+
+    Works as ``with`` and as ``async with``. On exit, normal or by exception,
+    the previous id is restored (nested scopes restore the outer id; inside a
+    tagged request, the request's id). Tasks created inside the scope keep the
+    id. ``request_id`` must pass the same rule as the ``X-Request-Id`` header:
+    an id the middleware would ignore raises ``ValueError``, a non-``str``
+    raises ``TypeError``.
+    """
+
+    __slots__ = ("_request_id", "_token")
+
+    def __init__(self, request_id: str) -> None:
+        if not isinstance(request_id, str):
+            raise TypeError("request_id must be a str")
+        if parse_request_id(request_id) is None:
+            raise ValueError(
+                "request_id must be 1-128 characters of [A-Za-z0-9._:-], "
+                "starting with a letter or digit"
+            )
+        self._request_id = request_id
+        self._token: contextvars.Token[str | None] | None = None
+
+    def __enter__(self) -> request_scope:
+        if self._token is not None:
+            raise RuntimeError("this request_scope is already entered")
+        self._token = _REQUEST_ID.set(self._request_id)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        token, self._token = self._token, None
+        if token is not None:
+            _REQUEST_ID.reset(token)
+
+    async def __aenter__(self) -> request_scope:
+        return self.__enter__()
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.__exit__(*exc)
+
+
 def spawn_untagged(coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
     """Start ``coro`` as a task in a fresh, empty context."""
     return asyncio.get_running_loop().create_task(coro, name=name, context=contextvars.Context())

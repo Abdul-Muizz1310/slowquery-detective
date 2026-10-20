@@ -1,6 +1,6 @@
 [project]
 name = "slowquery-detective"
-version = "0.2.0"
+version = "0.2.1"
 description = "Drop-in FastAPI + SQLAlchemy middleware that fingerprints Postgres queries, attributes them to the request that caused them, runs EXPLAIN off the request path, and suggests indexes via a rules engine with LLM fallback."
 readme = "README.md"
 authors = [
