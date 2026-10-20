@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-20
+
+### Added
+
+- `request_scope(request_id)`, exported from the package root: a context manager (`with` or
+  `async with`) that attributes the statements run inside it to `request_id`, for work that runs
+  outside the request that caused it, such as a background job processing an upload. It restores the
+  previous id on exit, also on an exception, so scopes nest; tasks created inside it keep the id. The
+  id must pass the `X-Request-Id` rule: an invalid id raises `ValueError`, a non-`str` raises
+  `TypeError`. This replaces setting the library's private context variable.
+
 ## [0.2.0] - 2026-10-20
 
 Fleet observability: install the library in every backend, keep what it sees in the service's own
@@ -141,7 +152,8 @@ stubs that raised `NotImplementedError`; 0.1.1 is the first release in which bot
 - First release: SQL fingerprinting, a sliding-window ring buffer, SQLAlchemy hooks, a background
   `EXPLAIN` worker, a six-rule engine, an OpenRouter fallback and `install()`.
 
-[Unreleased]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Abdul-Muizz1310/slowquery-detective/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Abdul-Muizz1310/slowquery-detective/releases/tag/v0.1.0
