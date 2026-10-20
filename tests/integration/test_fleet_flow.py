@@ -445,3 +445,29 @@ async def test_llm_fallback_still_works_in_a_second_lifespan(
 
                 await eventually(_has_suggestion)
     assert route.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 66 — work outside any request, attributed with request_scope (0.2.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_66_background_job_under_request_scope_is_listed(
+    engine: AsyncEngine, pg: PostgresContainer
+) -> None:
+    from slowquery_detective import request_scope
+
+    app = build_app(engine, pg)
+    async with running(app) as c:
+        # A job runner outside any request, e.g. processing an upload later.
+        async with engine.connect() as conn:
+            with request_scope("JOB-1"):
+                await conn.execute(
+                    text("SELECT count(*) FROM fleet_orders WHERE total > :t"), {"t": 3}
+                )
+                await conn.execute(
+                    text("SELECT count(*) FROM fleet_orders WHERE total > :t"), {"t": 4}
+                )
+            await conn.execute(text("SELECT count(*) FROM fleet_orders WHERE total > :t"), {"t": 5})
+        rows = await by_request(c, "JOB-1")
+    assert calls(rows) == {"select count(*) from fleet_orders where total > ?": 2}

@@ -226,7 +226,7 @@ def test_06_llm_config_defaults_are_the_free_models(monkeypatch: pytest.MonkeyPa
 def test_public_surface() -> None:
     import slowquery_detective as sd
 
-    assert sd.__version__ == "0.2.0"
+    assert sd.__version__ == "0.2.1"
     assert set(sd.__all__) == {
         "InMemoryStoreWriter",
         "LlmConfig",
@@ -238,5 +238,6 @@ def test_public_surface() -> None:
         "__version__",
         "current_request_id",
         "install",
+        "request_scope",
     }
     assert not hasattr(sd, "dashboard_router")
