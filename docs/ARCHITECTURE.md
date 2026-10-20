@@ -60,6 +60,8 @@ Slow-query detection is a per-observation `duration_ms >= threshold_ms` check, n
 
 A tagged statement is always recorded; `sample_rate` applies only to untagged statements.
 
+Work that runs outside the request that caused it (a background job processing an upload) is attributed with `request_scope(request_id)`, a context manager (`with` or `async with`) that sets the same context variable and restores the previous value on exit; it validates the id with the header's rule.
+
 ## The Postgres store
 
 `PostgresStoreWriter` opens its own engine from `store_url` (pool 2 + 2, `pool_pre_ping`, `pool_recycle=300`, a 10 s connect timeout, asyncpg's statement cache off for `-pooler` hosts). The hooks are never attached to it, so its traffic is never observed. On `start()` it checks whether the six tables exist; if not, it runs the DDL in one transaction under `pg_advisory_xact_lock`, every statement `CREATE … IF NOT EXISTS`, so a boot that repeats it, and several processes booting at once, all succeed (tested by four concurrent first boots against an empty database).
@@ -165,9 +167,9 @@ middleware ─┬─ tagging          router ── runtime ─┬─ recorder
 
 | Layer | Count | Runs in CI? |
 |---|---|---|
-| Unit (`tests/unit/`) | 449 | Yes — `test` job, branch coverage ≥ 90 % |
-| Integration (`tests/integration/`, Testcontainers Postgres 16) | 56 (3 of them `@slow`) | Yes — `integration` job runs the 53 non-slow ones with the unit tier, branch coverage ≥ 95 % overall and ≥ 85 % per module |
+| Unit (`tests/unit/`) | 467 | Yes — `test` job, branch coverage ≥ 90 % |
+| Integration (`tests/integration/`, Testcontainers Postgres 16) | 57 (3 of them `@slow`) | Yes — `integration` job runs the 54 non-slow ones with the unit tier, branch coverage ≥ 95 % overall and ≥ 85 % per module |
 | Slow (`@pytest.mark.slow`) | 6 | No — benchmark-style, `uv run pytest -m slow` |
-| **Total** | **508** | |
+| **Total** | **527** | |
 
 `tests/store_contract.py` is one behavioural contract run against both stores (in memory in the unit tier, Postgres in the integration tier). `tests/integration/test_fleet_flow.py` is the composed flow: a FastAPI app on a real asyncpg engine, tagged requests, background tasks, slow statements, restarts and shutdown.

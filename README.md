@@ -124,9 +124,9 @@ flowchart TB
 ```
 slowquery-detective/
 ├── src/slowquery_detective/
-│   ├── __init__.py          # Public surface: install(), stores, QueryRow, current_request_id
+│   ├── __init__.py          # Public surface: install(), request_scope, stores, QueryRow
 │   ├── middleware.py        # install() — validation and wiring
-│   ├── tagging.py           # X-Request-Id → context variable (ASGI middleware)
+│   ├── tagging.py           # X-Request-Id → context variable (ASGI middleware), request_scope
 │   ├── hooks.py             # SQLAlchemy event listeners
 │   ├── fingerprint.py       # sqlglot-based SQL fingerprinting
 │   ├── buffer.py            # Ring buffer — 60s sliding window, p50/p95/p99
@@ -177,6 +177,21 @@ install(app, engine, service="paper-trail",
 - **`store_url`** is the service's own database URL. `postgres://`, `postgresql://` and Neon's `?sslmode=require&channel_binding=require` are accepted and normalised for asyncpg; `postgresql+psycopg://` is kept as given. The store opens its own small pool (2 + 2 overflow) and creates schema `slowquery` on startup — `CREATE … IF NOT EXISTS` under an advisory lock, so running it on every boot is safe. Leave `store_url` out (tests, SQLite) to use the in-memory store.
 - **`authorize`** receives the Starlette `Request` and must return `True` to allow; anything else is 403. Raise `HTTPException(401)` from it if you want a 401. Without the hook every route answers 403.
 - **Request ids** come from `X-Request-Id`: 1–128 characters of `[A-Za-z0-9._:-]`, starting with a letter or digit. Other values leave the request untagged and are otherwise ignored. Requests to the library's own routes are never tagged, so measuring request R never adds to R. `current_request_id()` exposes the value to your own code.
+- **Work outside a request** — a background job runner that processes an upload after the upload's request has returned — is attributed with `request_scope`:
+
+  ```python
+  from slowquery_detective import current_request_id, request_scope
+
+  # In the upload endpoint: remember who caused the job.
+  job.request_id = current_request_id()
+
+  # In the job runner, outside any request:
+  if job.request_id is not None:
+      with request_scope(job.request_id):   # `async with` works too
+          await process(job)                # its queries count towards the upload's request
+  ```
+
+  The scope restores the previous id on exit (also on an exception; nested scopes restore the outer id), tasks created inside it keep the id, and an id the middleware would reject raises `ValueError`.
 - If the database is asleep or unreachable at startup, the app still starts: the error is logged, pending data is held (bounded) and the store is retried; the routes answer 503 until it is up.
 
 ## 📡 Routes
@@ -257,15 +272,15 @@ The models default to `google/gemma-4-26b-a4b-it:free` → `minimax/minimax-m3.1
 
 | Metric | Value |
 |---|---|
-| Unit tests (`-m "not slow and not integration"`) | 449 |
-| Integration tests (Testcontainers Postgres 16) | 56 (53 + 3 `@slow`) |
+| Unit tests (`-m "not slow and not integration"`) | 467 |
+| Integration tests (Testcontainers Postgres 16) | 57 (54 + 3 `@slow`) |
 | Slow benchmark-style tests | 6 (3 of them integration) |
 | Branch coverage, unit tier (CI gate ≥ 90 %) | 92% |
 | Branch coverage, unit + integration (CI gate ≥ 95 %, every module ≥ 85 %) | 98% (lowest module 91%) |
 | Feature specs | 8 (under `docs/specs/`) |
 | Type checker | mypy strict, zero errors |
 
-The suite is **Spec-TDD**: the 8 feature specs under [`docs/specs/`](docs/specs/) enumerate every case, and 508 pytest items encode them. CI runs the unit tier with a coverage gate, then the unit and integration tiers together against a real Postgres (Testcontainers on the GitHub-hosted Docker daemon) with branch coverage and a per-module floor. Both stores pass one shared behavioural contract, [`tests/store_contract.py`](tests/store_contract.py). The composed flow — a tagged request on a real asyncpg engine, listed by `GET /_slowquery/queries?request_id=` — is `tests/integration/test_fleet_flow.py`.
+The suite is **Spec-TDD**: the 8 feature specs under [`docs/specs/`](docs/specs/) enumerate every case, and 527 pytest items encode them. CI runs the unit tier with a coverage gate, then the unit and integration tiers together against a real Postgres (Testcontainers on the GitHub-hosted Docker daemon) with branch coverage and a per-module floor. Both stores pass one shared behavioural contract, [`tests/store_contract.py`](tests/store_contract.py). The composed flow — a tagged request on a real asyncpg engine, listed by `GET /_slowquery/queries?request_id=` — is `tests/integration/test_fleet_flow.py`.
 
 ```bash
 uv run pytest                    # unit tests only (default)
@@ -304,7 +319,7 @@ The per-statement cost is the attached `before`/`after` listener pair timed end 
 
 **Counts are shared; percentiles are per process.** With the Postgres store, every process adds its calls and totals to the same rows, so `call_count`, `total_ms`, `max_ms` and the per-request numbers cover the whole deployment. The p50/p95/p99 columns, though, are each process's own 60-second window, written by whichever process flushed last. The in-memory store (no `store_url`) sees only its own process.
 
-**Request attribution needs the caller to send `X-Request-Id`.** Statements run outside a tagged request (startup, schedulers, the library's own background tasks) count towards the fingerprint totals only. Statements in threads started without copying the context are not attributed.
+**Request attribution needs the caller to send `X-Request-Id`.** Statements run outside a tagged request (startup, schedulers, the library's own background tasks) count towards the fingerprint totals only, unless you wrap the work in `request_scope`. Statements in threads started without copying the context are not attributed.
 
 **Writes are sampled, never explained.** `INSERT`/`UPDATE`/`DELETE` and DDL are fingerprinted and counted but never sent to `EXPLAIN`; `executemany` batches are never explained either.
 
@@ -319,7 +334,8 @@ The per-statement cost is the attached `before`/`after` listener pair timed end 
 | v0.1.0 on [PyPI](https://pypi.org/project/slowquery-detective/) | ✅ Released 2026-04-11 |
 | v0.1.1 on [PyPI](https://pypi.org/project/slowquery-detective/) — security fixes, see [CHANGELOG](CHANGELOG.md) | ✅ Released 2026-10-20 |
 | v0.2.0 on [PyPI](https://pypi.org/project/slowquery-detective/) — fleet observability, see [CHANGELOG](CHANGELOG.md) | ✅ Released 2026-10-20 |
-| 449 unit + 56 integration tests, 98% branch coverage, mypy strict | ✅ Green |
+| v0.2.1 on [PyPI](https://pypi.org/project/slowquery-detective/) — `request_scope` for background work | ✅ Released 2026-10-20 |
+| 467 unit + 57 integration tests, 98% branch coverage, mypy strict | ✅ Green |
 | Live demo ([slowquery-demo-backend](https://github.com/Abdul-Muizz1310/slowquery-demo-backend)) | 🟡 Moving onto the 0.2 store |
 | Dashboard ([slowquery-dashboard-frontend](https://github.com/Abdul-Muizz1310/slowquery-dashboard-frontend)) | 🟡 Phase 4c |
 
