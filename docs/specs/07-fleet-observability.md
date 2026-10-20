@@ -84,6 +84,19 @@ Exported from `slowquery_detective`: `install`, `StoreWriter`, `InMemoryStoreWri
 3c. Middleware the host adds *after* `install` wraps outside the tagger, so its statements are not
    attributed; call `install` after the host's own `add_middleware` calls.
 
+### Request scopes for work outside a request (`tagging.py`, 0.2.1)
+
+3d. `request_scope(request_id)` is a public context manager, exported from the package root, that
+   attributes the statements run inside it to `request_id`. It exists for work that runs outside the
+   request that caused it — a background job runner that processes an upload later — so the
+   upload's request id can still be charged. It works as `with` and as `async with`; on exit, normal
+   or by exception, it restores whatever id was set before (nesting restores the outer id; inside a
+   tagged request it restores the request's id). Tasks created inside the scope keep the id, as
+   they copy the context at creation.
+3e. The id must pass the same rule as the header (`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`); an id the
+   middleware would ignore raises `ValueError`, a non-`str` raises `TypeError`, and nothing is set.
+   Entering one scope object a second time before it exits raises `RuntimeError`.
+
 ### Recording (`hooks.py`, `recorder.py`)
 
 4. The start time of a statement is stored as an attribute of its SQLAlchemy `ExecutionContext`
@@ -330,9 +343,22 @@ Exported from `slowquery_detective`: `install`, `StoreWriter`, `InMemoryStoreWri
 59. In-memory fingerprint eviction takes the fingerprint's samples and request rows with it; the
     cooldown map is pruned.
 
+### Request scopes (0.2.1; unit, and integration for 66)
+
+60. Inside `request_scope("A")` the current id is `A`; after it, the previous id (`None`).
+61. Nested `A` then `B`: `B` inside, `A` after the inner exit, `None` after the outer.
+62. An exception inside the scope propagates and the previous id is restored.
+63. An `asyncio` task created inside the scope sees the id, even when it runs after the scope exits.
+64. `async with request_scope("A")` behaves like `with`; inside a tagged request, the scope
+    overrides the request's id and restores it on exit.
+65. Invalid ids (the header's rejection list) raise `ValueError`, `None` and `int` raise `TypeError`,
+    and nothing is set; re-entering an entered scope object raises `RuntimeError`.
+66. A job run outside any request under `request_scope("JOB-1")` on a real asyncpg engine is listed by
+    `GET /_slowquery/queries?request_id=JOB-1`.
+
 ## Acceptance criteria
 
-- [ ] Cases 1–59 pass; integration cases run in CI (`pytest -m integration`, Testcontainers).
+- [ ] Cases 1–66 pass; integration cases run in CI (`pytest -m integration`, Testcontainers).
 - [ ] ruff, ruff format, mypy `--strict` clean.
 - [ ] Branch coverage on in CI; no module under 85 %.
 - [ ] README: fleet install in three lines with an `authorize` hook, migration notes from 0.1, every
