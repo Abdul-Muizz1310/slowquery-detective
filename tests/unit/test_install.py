@@ -214,7 +214,7 @@ def test_06_llm_config_defaults_are_the_free_models(monkeypatch: pytest.MonkeyPa
         monkeypatch.delenv(var, raising=False)
     cfg = LlmConfig()
     assert cfg.model_primary == "google/gemma-4-26b-a4b-it:free"
-    assert cfg.model_fast == "minimax/minimax-m3.1-flash:free"
+    assert cfg.model_fast == "xingchen-agi/xing4.0-29b-a4b:free"
     assert cfg.model_fallback == "google/gemma-4-31b-it:free"
 
 
