@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `LlmConfig.model_fast` defaults to `xingchen-agi/xing4.0-29b-a4b:free`: the previous default,
+  `minimax/minimax-m3.1-flash:free`, left OpenRouter on 2026-10-26, so the fast tier answered 404
+  and the cascade skipped to the fallback.
+
 ## [0.2.1] - 2026-10-20
 
 ### Added

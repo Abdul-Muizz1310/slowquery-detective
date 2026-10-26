@@ -243,7 +243,7 @@ llm_config = LlmConfig(enabled=True, api_key=SecretStr("sk-or-v1-..."))
 install(app, engine, service="paper-trail", enable_llm=True, llm_config=llm_config)
 ```
 
-The models default to `google/gemma-4-26b-a4b-it:free` → `minimax/minimax-m3.1-flash:free` → `google/gemma-4-31b-it:free` (override `model_primary`, `model_fast`, `model_fallback`). The cascade moves on at HTTP 429 / 5xx / network errors and any non-401 4xx; `401` ends it. A per-fingerprint cooldown (60s default) stops a hot fingerprint from burning credits. The LLM only ever sees the scrubbed plan and the canonical SQL.
+The models default to `google/gemma-4-26b-a4b-it:free` → `xingchen-agi/xing4.0-29b-a4b:free` → `google/gemma-4-31b-it:free` (override `model_primary`, `model_fast`, `model_fallback`). The cascade moves on at HTTP 429 / 5xx / network errors and any non-401 4xx; `401` ends it. A per-fingerprint cooldown (60s default) stops a hot fingerprint from burning credits. The LLM only ever sees the scrubbed plan and the canonical SQL.
 
 ## 🔁 Migrating from 0.1
 
