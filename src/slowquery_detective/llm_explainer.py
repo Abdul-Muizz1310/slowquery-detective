@@ -55,7 +55,8 @@ class LlmConfig(BaseSettings):
     base_url: HttpUrl = HttpUrl("https://openrouter.ai/api/v1")
     # The portfolio's free OpenRouter models (never a paid default).
     model_primary: str = "google/gemma-4-26b-a4b-it:free"
-    model_fast: str = "minimax/minimax-m3.1-flash:free"
+    # minimax-m3.1-flash left OpenRouter on 2026-10-26; this one passed a JSON-mode smoke call.
+    model_fast: str = "xingchen-agi/xing4.0-29b-a4b:free"
     model_fallback: str = "google/gemma-4-31b-it:free"
     temperature: float = Field(default=0.1, ge=0.0, le=0.3)
     min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
