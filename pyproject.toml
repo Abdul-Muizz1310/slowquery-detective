@@ -54,7 +54,7 @@ postgres = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.17,<0.13.0"]
+requires = ["uv_build>=0.9.17,<0.14.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -64,11 +64,12 @@ dev = [
     "mypy>=1.13",
     "psycopg2-binary>=2.9.11",
     "pytest>=8.3",
-    "pytest-asyncio>=0.24",
+    "pytest-asyncio>=1.5",
     "pytest-cov>=6.0",
     "respx>=0.21",
     "ruff>=0.8",
-    "testcontainers[postgres]>=4.8",
+    # 4.15 moved PostgresContainer to testcontainers.community.postgres.
+    "testcontainers[postgres]>=4.15",
     # Reserved for the unchecked acceptance criterion in
     # docs/specs/04-explainer.md:132 (a committed cassette of a real OpenRouter
     # happy-path call, replayed under `pytest.mark.slow`). Unimported today on
@@ -109,6 +110,9 @@ ignore_errors = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# pytest-asyncio 1.5 warns when this is unset; "fixture-scope" (new in 1.5) is
+# the 1.x default spelled out: an async fixture runs in its own scope's loop.
+asyncio_default_fixture_loop_scope = "fixture-scope"
 markers = [
     "slow: slow end-to-end tests (CI-only)",
     "integration: requires Testcontainers / real Postgres",

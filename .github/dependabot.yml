@@ -1,6 +1,8 @@
 version: 2
 updates:
   # Pin-bump the actions used by ci.yml / publish.yml.
+  # astral-sh/setup-uv stopped publishing major tags at v8 (immutable releases
+  # only), so it is pinned to a full version: a bare `@v7` never sees v8+.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -18,6 +20,12 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 10
+    # This is a published library: a raised floor in pyproject.toml narrows
+    # what downstream users can resolve. `widen` only ever moves the lock, or
+    # an upper bound when a cap excludes the new release (e.g. uv_build).
+    # It is what `auto` picks for libraries today; set explicitly so a change
+    # in that heuristic cannot start raising floors.
+    versioning-strategy: "widen"
     commit-message:
       prefix: "chore"
     groups:

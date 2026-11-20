@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 from slowquery_detective.explain import ExplainJob, ExplainWorker
 from slowquery_detective.rules import run_rules

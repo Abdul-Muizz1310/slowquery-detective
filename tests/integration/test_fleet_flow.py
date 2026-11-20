@@ -20,7 +20,7 @@ import pytest
 from fastapi import BackgroundTasks, FastAPI, Request
 from sqlalchemy import Column, MetaData, String, Table, Uuid, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 import slowquery_detective.hooks as hooks_mod
 from slowquery_detective import install
