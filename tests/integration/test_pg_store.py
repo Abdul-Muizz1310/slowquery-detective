@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 from slowquery_detective.pg_store import PostgresStoreWriter
 from slowquery_detective.store import StoreWriter

@@ -61,7 +61,7 @@ def _docker_is_available() -> bool:
 
 from collections.abc import Iterator  # noqa: E402
 
-from testcontainers.postgres import PostgresContainer  # noqa: E402
+from testcontainers.community.postgres import PostgresContainer  # noqa: E402
 
 
 @pytest.fixture(scope="session")
