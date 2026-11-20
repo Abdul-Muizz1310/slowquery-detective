@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       - run: uv run ruff check .
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       # Critical-path HTTP surface (dashboard auth, DDL binding, threshold
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       # Both tiers together: hooks.py and pg_store.py are exercised against
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       - run: uv build
